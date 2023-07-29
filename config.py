@@ -86,6 +86,8 @@ _C.TRAIN.DATA.PREPROCESS.BIGSMALL.RESIZE.BIG_W = 144
 _C.TRAIN.DATA.PREPROCESS.BIGSMALL.RESIZE.BIG_H = 144
 _C.TRAIN.DATA.PREPROCESS.BIGSMALL.RESIZE.SMALL_W = 9
 _C.TRAIN.DATA.PREPROCESS.BIGSMALL.RESIZE.SMALL_H = 9
+
+_C.TRAIN.SSL = 1
 # -----------------------------------------------------------------------------
 # Valid settings
 # -----------------------------------------------------------------------------\
@@ -299,6 +301,8 @@ _C.MODEL.EFFICIENTPHYS.FRAME_DEPTH = 10
 _C.MODEL.BIGSMALL = CN()
 _C.MODEL.BIGSMALL.FRAME_DEPTH = 3
 
+_C.MODEL.EPISODIC = False
+
 # -----------------------------------------------------------------------------
 # Inference settings
 # -----------------------------------------------------------------------------
@@ -309,6 +313,7 @@ _C.INFERENCE.EVALUATION_WINDOW = CN()
 _C.INFERENCE.EVALUATION_WINDOW.USE_SMALLER_WINDOW = False
 _C.INFERENCE.EVALUATION_WINDOW.WINDOW_SIZE = 10
 _C.INFERENCE.MODEL_PATH = ''
+_C.INFERENCE.TTA = 'tent'
 
 # -----------------------------------------------------------------------------
 # Device settings
@@ -321,6 +326,38 @@ _C.NUM_OF_GPU_TRAIN = 1
 # -----------------------------------------------------------------------------
 _C.LOG = CN()
 _C.LOG.PATH = "runs/exp"
+
+
+_C.OPTIM = CN()
+# Number of updates per batch
+_C.OPTIM.STEPS = 1
+# Learning rate
+_C.OPTIM.LR = 1e-3
+# Choices: Adam, SGD
+_C.OPTIM.METHOD = 'Adam'
+# Beta
+_C.OPTIM.BETA = 0.9
+# Momentum
+_C.OPTIM.MOMENTUM = 0.9
+# Momentum dampening
+_C.OPTIM.DAMPENING = 0.0
+# Nesterov momentum
+_C.OPTIM.NESTEROV = True
+# L2 regularization
+_C.OPTIM.WD = 0.0
+
+
+
+_C.ADAPTER = CN()
+_C.ADAPTER.NAME ='rotta'
+
+_C.ADAPTER.RoTTA = CN()
+_C.ADAPTER.RoTTA.MEMORY_SIZE = 16
+_C.ADAPTER.RoTTA.UPDATE_FREQUENCY = 16
+_C.ADAPTER.RoTTA.NU = 0.001
+_C.ADAPTER.RoTTA.ALPHA = 0.05
+_C.ADAPTER.RoTTA.LAMBDA_T = 1.0
+_C.ADAPTER.RoTTA.LAMBDA_U = 1.0
 
 
 def _update_config_from_file(config, cfg_file):

@@ -75,7 +75,11 @@ def train_and_test(config, data_loader_dict):
         model_trainer = trainer.BigSmallTrainer.BigSmallTrainer(config, data_loader_dict)
     else:
         raise ValueError('Your Model is Not Supported  Yet!')
-    model_trainer.train(data_loader_dict)
+
+    if config.TRAIN.SSL:
+        model_trainer.train_ssl(data_loader_dict)
+    else:
+        model_trainer.train(data_loader_dict)
     model_trainer.test(data_loader_dict)
 
 
@@ -93,7 +97,14 @@ def test(config, data_loader_dict):
         model_trainer = trainer.BigSmallTrainer.BigSmallTrainer(config, data_loader_dict)
     else:
         raise ValueError('Your Model is Not Supported  Yet!')
-    model_trainer.test(data_loader_dict)
+
+    if config.INFERENCE.TTA =='':
+        model_trainer.test(data_loader_dict)
+    elif config.INFERENCE.TTA =='tent':
+        model_trainer.tta_tent(data_loader_dict)
+    elif config.INFERENCE.TTA =='rotta':
+        model_trainer.tta_rotta(data_loader_dict)
+
 
 
 def unsupervised_method_inference(config, data_loader):
@@ -160,7 +171,7 @@ if __name__ == "__main__":
                 config_data=config.TRAIN.DATA)
             data_loader_dict['train'] = DataLoader(
                 dataset=train_data_loader,
-                num_workers=16,
+                num_workers=16, # num_workers= 16
                 batch_size=config.TRAIN.BATCH_SIZE,
                 shuffle=True,
                 worker_init_fn=seed_worker,
@@ -240,7 +251,7 @@ if __name__ == "__main__":
                 config_data=config.TEST.DATA)
             data_loader_dict["test"] = DataLoader(
                 dataset=test_data,
-                num_workers=16,
+                num_workers=0, # num_workers= 16
                 batch_size=config.INFERENCE.BATCH_SIZE,
                 shuffle=False,
                 worker_init_fn=seed_worker,

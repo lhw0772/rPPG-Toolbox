@@ -4,6 +4,7 @@ import torch
 from evaluation.post_process import *
 from tqdm import tqdm
 
+import matplotlib.pyplot as plt
 
 def read_label(dataset):
     """Read manually corrected labels."""
@@ -95,6 +96,13 @@ def calculate_metrics(predictions, labels, config):
     if config.INFERENCE.EVALUATION_METHOD == "FFT":
         gt_hr_fft_all = np.array(gt_hr_fft_all)
         predict_hr_fft_all = np.array(predict_hr_fft_all)
+
+        plt.plot(gt_hr_fft_all, color='red')
+        plt.plot(predict_hr_fft_all, color='blue')
+
+        plt.plot(abs(gt_hr_fft_all-predict_hr_fft_all),color='green')
+        plt.show()
+
         SNR_all = np.array(SNR_all)
         num_test_samples = len(predict_hr_fft_all)
         for metric in config.TEST.METRICS:

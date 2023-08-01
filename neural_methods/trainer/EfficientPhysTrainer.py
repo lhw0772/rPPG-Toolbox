@@ -352,6 +352,11 @@ class EfficientPhysTrainer(BaseTrainer):
 
     def train_ssl(self, data_loader):
 
+        if os.path.exists(self.config.INFERENCE.MODEL_PATH):
+            self.model.load_state_dict(torch.load(self.config.INFERENCE.MODEL_PATH))
+            print("Traing SSL uses pretrained model!")
+
+
         for epoch in range(self.max_epoch_num):
             print('')
             print(f"====Training Epoch: {epoch}====")
@@ -410,6 +415,8 @@ class EfficientPhysTrainer(BaseTrainer):
                 freqs, psd = tent.torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz,
                                                           high_hz=high_hz,
                                                           normalize=False, bandpass=False)
+
+                speed = torch.tensor([speed]*8)
 
                 bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz,
                                                    device='cuda:0')

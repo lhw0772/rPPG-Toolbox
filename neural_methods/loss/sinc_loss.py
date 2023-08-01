@@ -36,8 +36,8 @@ def IPR_SSL(freqs, psd, speed=None, low_hz=BP_LOW, high_hz=BP_HIGH, device=None)
         batch_size = psd.shape[0]
         ipr_losses = torch.ones((batch_size,1)).to(device)
         for b in range(batch_size):
-            low_hz_b = low_hz * speed
-            high_hz_b = high_hz * speed
+            low_hz_b = low_hz * speed[b]
+            high_hz_b = high_hz * speed[b]
             psd_b = psd[b].view(1,-1)
             ipr_losses[b] = _IPR_SSL(freqs, psd_b, low_hz=low_hz_b, high_hz=high_hz_b, device=device)
         ipr_loss = torch.mean(ipr_losses)
@@ -67,15 +67,15 @@ def EMD_SSL(freqs, psd, speed=None, low_hz=BP_LOW, high_hz=BP_HIGH, normalized=F
         B = psd.shape[0]
         expected = torch.zeros_like(freqs).to(device)
         for b in range(B):
-            speed_b = speed
+            speed_b = speed[b]
             low_hz_b = low_hz * speed_b
             high_hz_b = high_hz * speed_b
             supp_idcs = torch.logical_and(freqs >= low_hz_b, freqs <= high_hz_b)
             uniform = torch.zeros_like(freqs)
             uniform[supp_idcs] = 1 / torch.sum(supp_idcs)
             expected = expected + uniform.to(device)
-        lowest_hz = low_hz*speed
-        highest_hz = high_hz*speed
+        lowest_hz = low_hz*torch.min(speed)
+        highest_hz = high_hz*torch.max(speed)
         bpassed_freqs, psd = ideal_bandpass(freqs, psd, lowest_hz, highest_hz)
         bpassed_freqs, expected = ideal_bandpass(freqs, expected[None,:], lowest_hz, highest_hz)
         expected = expected[0] / torch.sum(expected[0]) #normalize expected psd
@@ -116,8 +116,8 @@ def SNR_SSL(freqs, psd, speed=None, low_hz=BP_LOW, high_hz=BP_HIGH, freq_delta=B
         batch_size = psd.shape[0]
         snr_losses = torch.ones((batch_size,1)).to(device)
         for b in range(batch_size):
-            low_hz_b = low_hz * speed
-            high_hz_b = high_hz * speed
+            low_hz_b = low_hz * speed[b]
+            high_hz_b = high_hz * speed[b]
             snr_losses[b] = _SNR_SSL(freqs, psd[b].view(1,-1), low_hz=low_hz_b, high_hz=high_hz_b, freq_delta=freq_delta, normalized=normalized, bandpassed=bandpassed, device=device)
         snr_loss = torch.mean(snr_losses)
     return snr_loss

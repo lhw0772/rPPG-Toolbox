@@ -17,7 +17,7 @@ from evaluation.post_process import _detrend, calculate_metric_per_video
 from scipy.signal import butter
 import scipy
 import numpy as np
-
+from utils.utils import set_named_submodule, get_named_submodule
 
 EPSILON = 1e-10
 BP_LOW=2/3
@@ -105,12 +105,34 @@ class Tent(nn.Module):
         self.model_state, self.optimizer_state = \
             copy_model_and_optimizer(self.model, self.optimizer)
 
+        self.log_list = []
+
     def forward(self, x , y):
         if self.episodic:
             self.reset()
 
+        """
         for _ in range(self.steps):
-            outputs = forward_and_adapt(x, y , self.model, self.optimizer)
+            outputs , loss_val = forward_and_adapt(x, y , self.model, self.optimizer)
+        """
+
+        loss_val = get_loss(x,self.model)
+
+        TH = 0.8
+        iter_max = 50
+        iter = 0
+
+        if loss_val< TH:
+            print ('pass')
+            outputs = forward_and_adapt(x, y, self.model, self.optimizer)
+        else:
+            print('update X ',iter_max)
+            while loss_val > TH and iter < iter_max:
+                outputs = forward_and_adapt(x, y, self.model, self.optimizer)
+                loss_val = get_loss(x, self.model)
+                print (loss_val)
+                iter+=1
+
 
         return outputs
 
@@ -141,6 +163,32 @@ def mc_dropout_uncertainty_loss(outputs, num_mc_samples):
     variance = torch.var(outputs, dim=0, unbiased=False)  # Calculate variance across batches
     return torch.mean(variance)
 
+def get_loss(x,model):
+
+    fps = float(30)
+    low_hz = float(0.66666667)
+    high_hz = float(3.0)
+
+    predictions_ = model(x)
+    predictions_smooth = torch_detrend(torch.cumsum(predictions_, axis=0), torch.tensor(100.0))
+
+    # predictions_batch = predictions_smooth.view(-1,180)
+    predictions_batch = predictions_smooth.T
+
+    freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                              normalize=False, bandpass=False)
+    speed = torch.tensor([1.0])
+
+    bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+    variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+    sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+
+    batch_total_loss = bandwidth_loss + variance_loss + sparsity_loss
+    test_loss = batch_total_loss.detach().cpu().numpy()
+
+    return test_loss
+
+
 @torch.enable_grad()  # ensure grads in possible no grad context for testing
 def forward_and_adapt(x, y, model, optimizer):
     """Forward and adapt model on batch of data.
@@ -162,7 +210,6 @@ def forward_and_adapt(x, y, model, optimizer):
 
     # Save the initial parameters along with their names
     initial_params = {name: param.clone().detach() for name, param in model.named_parameters()}
-
 
     predictions_ = model(x)
 
@@ -197,6 +244,7 @@ def forward_and_adapt(x, y, model, optimizer):
             self.speed_fast = 1.0 # self.speed_fast = 1.4
 
     if SINC:
+        #model.train()
         auginfo = Auginfo(x.shape[0])
 
         x_aug, speed = sinc_aug.apply_transformations(auginfo, x.permute(0,2,3,1).cpu().numpy()) # [C,T,H,W]
@@ -209,20 +257,19 @@ def forward_and_adapt(x, y, model, optimizer):
 
         freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
                                                   normalize=False, bandpass=False)
+        speed = torch.tensor([speed]*4)
 
         bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
         variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
         sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
-        print ("bandwidth_loss:",bandwidth_loss,"sparsity_loss:",sparsity_loss,"variance_loss:",variance_loss)
+        #print ("bandwidth_loss:",bandwidth_loss,"sparsity_loss:",sparsity_loss,"variance_loss:",variance_loss)
 
         sinc_total_loss  = bandwidth_loss + variance_loss + sparsity_loss
-
         total_loss += sinc_total_loss
 
     optimizer.zero_grad()
     total_loss.backward()
     optimizer.step()
-
 
     """
     for name, param in model.named_parameters():
@@ -231,6 +278,8 @@ def forward_and_adapt(x, y, model, optimizer):
         else:
             print(f"Parameter '{name}' remains unchanged.")
     """
+
+    #predictions_ = model(x)
     return predictions_
 
 
@@ -245,8 +294,9 @@ def collect_params(model):
     params = []
     names = []
     for nm, m in model.named_modules():
-        if isinstance(m, nn.BatchNorm2d):
-            for np, p in m.named_parameters():
+        #if isinstance(m, nn.BatchNorm2d):
+        for np, p in m.named_parameters():
+            if p.requires_grad:
                 if np in ['weight', 'bias']:  # weight is scale, bias is shift
                     params.append(p)
                     names.append(f"{nm}.{np}")
@@ -273,7 +323,14 @@ def configure_model(model):
     # disable grad, to (re-)enable only what tent updates
     model.requires_grad_(False)
     # configure norm for tent updates: enable grad + force batch statisics
-    for m in model.modules():
+    for name, m in model.named_modules():
+
+        print (name)
+
+        if name.find('apperance_att_conv1') != -1:
+            target_layer = get_named_submodule(model, name)
+            target_layer.requires_grad_(True)
+
         if isinstance(m, nn.BatchNorm2d):
             m.requires_grad_(True)
             # force use of batch stats in train and eval modes

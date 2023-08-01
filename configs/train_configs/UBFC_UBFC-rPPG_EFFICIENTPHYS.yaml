@@ -99,9 +99,9 @@ MODEL:
   EFFICIENTPHYS:
     FRAME_DEPTH: 10
 INFERENCE:
-  BATCH_SIZE: 32
+  BATCH_SIZE: 4
   EVALUATION_METHOD: "FFT"        # "FFT" or "peak detection"
   EVALUATION_WINDOW:
     USE_SMALLER_WINDOW: Yes        # Change this if you'd like an evaluation window smaller than the test video length
     WINDOW_SIZE: 10        # In seconds
-  MODEL_PATH:   ""
+  MODEL_PATH:   "./final_model_release/PURE_EfficientPhys.pth"

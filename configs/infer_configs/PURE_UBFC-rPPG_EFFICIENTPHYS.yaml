@@ -38,6 +38,7 @@ MODEL:
   NAME: EfficientPhys
   EFFICIENTPHYS:
     FRAME_DEPTH: 10
+  EPISODIC: False
 INFERENCE:
   BATCH_SIZE: 4
   EVALUATION_METHOD: 'FFT'        # "FFT" or "peak detection"
@@ -45,7 +46,7 @@ INFERENCE:
     USE_SMALLER_WINDOW: True        # Change this if you'd like an evaluation window smaller than the test video length
     WINDOW_SIZE: 10        # In seconds 10
   MODEL_PATH:   "./final_model_release/PURE_EfficientPhys.pth"
-  #MODEL_PATH: "./PreTrainedModels/UBFC-rPPG_SizeW72_SizeH72_ClipLength180_DataTypeStandardized_DataAugNone_LabelTypeDiffNormalized_Crop_faceTrue_Large_boxTrue_Large_size1.5_Dyamic_DetFalse_det_len30_Median_face_boxFalse_bk/UBFC_UBFC_efficientphys_ssl_Epoch0.pth"
-  TTA: "rotta"
+  #MODEL_PATH: "./PreTrainedModels/UBFC-rPPG_SizeW72_SizeH72_ClipLength180_DataTypeStandardized_DataAugNone_LabelTypeDiffNormalized_Crop_faceTrue_Large_boxTrue_Large_size1.5_Dyamic_DetFalse_det_len30_Median_face_boxFalse_finetune/UBFC_UBFC_efficientphys_ssl_Epoch199.pth"
+  TTA: "tent"
 OPTIM:
   STEPS: 1

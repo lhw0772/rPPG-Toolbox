@@ -59,6 +59,8 @@ class CSTU:
         class_list = self.data[cls]
         class_occupied = len(class_list)
         all_occupancy = self.get_occupancy()
+
+        #print("all_occupancy:", all_occupancy)
         if class_occupied < self.per_class:
             if all_occupancy < self.capacity:
                 return True

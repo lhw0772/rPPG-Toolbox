@@ -327,6 +327,10 @@ _C.NUM_OF_GPU_TRAIN = 1
 _C.LOG = CN()
 _C.LOG.PATH = "runs/exp"
 
+# -----------------------------------------------------------------------------
+# tta optimizer settings
+# -----------------------------------------------------------------------------
+
 
 _C.OPTIM = CN()
 # Number of updates per batch
@@ -346,6 +350,9 @@ _C.OPTIM.NESTEROV = True
 # L2 regularization
 _C.OPTIM.WD = 0.0
 
+# -----------------------------------------------------------------------------
+# tta adapter settings
+# -----------------------------------------------------------------------------
 
 
 _C.ADAPTER = CN()
@@ -353,8 +360,8 @@ _C.ADAPTER.NAME ='rotta'
 
 _C.ADAPTER.RoTTA = CN()
 _C.ADAPTER.RoTTA.MEMORY_SIZE = 16
-_C.ADAPTER.RoTTA.UPDATE_FREQUENCY = 16
-_C.ADAPTER.RoTTA.NU = 0.001
+_C.ADAPTER.RoTTA.UPDATE_FREQUENCY = 4
+_C.ADAPTER.RoTTA.NU = 0.1 # 0.001
 _C.ADAPTER.RoTTA.ALPHA = 0.05
 _C.ADAPTER.RoTTA.LAMBDA_T = 1.0
 _C.ADAPTER.RoTTA.LAMBDA_U = 1.0

@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+
+import config
 from utils import memory
 from base_adapter import BaseAdapter
 from copy import deepcopy
@@ -9,7 +11,27 @@ from utils.utils import set_named_submodule, get_named_submodule
 from utils.custom_transforms import get_tta_transforms
 import sinc_aug, sinc_loss
 import tent
+import matplotlib.pyplot as plt
 
+
+def batched_normed_psd(x, y):
+  """
+  x: M(# aug) x T(# time stamp)
+  y: M(# aug) x T(# time stamp)
+  """
+
+  return torch.matmul(x[:,:,0],y[:,:,0].T).unsqueeze(0)
+
+def label_distance(labels_1, labels_2 , label_temperature=0.1):
+  # labels: bsz x M(#augs)
+  # output: bsz x M(#augs) x M(#augs)
+
+  labels_1 = labels_1.unsqueeze(0)
+  labels_2 = labels_2.unsqueeze(0)
+
+  dist_mat = - torch.abs(labels_1[:, :, None] - labels_2[:, None, :])
+  prob_mat = torch.softmax(dist_mat / label_temperature,dim =-1)
+  return prob_mat
 
 class RoTTA(BaseAdapter):
     def __init__(self, cfg, model, optimizer):
@@ -41,9 +63,8 @@ class RoTTA(BaseAdapter):
             freqs, psd = tent.torch_power_spectral_density(ema_smooth, fps=fps, low_hz=low_hz, high_hz=high_hz,
                                                       normalize=False, bandpass=False)
 
-            speed= 1.0
-
-            pseudo_label = torch.round(freqs[psd.argmax(axis=1)]*3)
+            speed= torch.tensor([torch.tensor(1.0)])
+            pseudo_label = torch.round(freqs[psd.argmax(axis=1)]*3)-2
 
             entropy = []
             for i in range(pseudo_label.shape[0]):
@@ -57,11 +78,14 @@ class RoTTA(BaseAdapter):
             entropy = torch.stack(entropy)
 
         # add into memory
-
         batch_data = batch_data[:-1].view(-1,180,3,72,72)
 
         for i, data in enumerate(batch_data):
             p_l = int(pseudo_label[i].item())
+
+            if p_l >= 8 or p_l < 0:
+                continue
+
             uncertainty = entropy[i].item()
             current_instance = (data, p_l, uncertainty)
             self.mem.add_instance(current_instance)
@@ -78,6 +102,10 @@ class RoTTA(BaseAdapter):
         # get memory data
         sup_data, ages = self.mem.get_memory()
         l_sup = None
+
+        initial_params = {name: param.clone().detach() for name, param in model.named_parameters()}
+        kld_loss = torch.nn.KLDivLoss(reduction='batchmean')
+
         if len(sup_data) > 0:
             sup_data = torch.stack(sup_data)
             num_of_gpu = 1
@@ -94,27 +122,131 @@ class RoTTA(BaseAdapter):
                     self.speed_slow = 0.6
                     self.speed_fast = 1.0  # self.speed_fast = 1.4
 
-            auginfo = Auginfo(sup_data.shape[1]+1)
+            neg_auginfo = Auginfo(sup_data.shape[1]+1)
+
+            pos_auginfo = Auginfo(sup_data.shape[1] + 1)
+            pos_auginfo.aug_speed = 0
 
             instance_weight = timeliness_reweighting(ages)
             l_sup_list =[]
+
+            ema_sup_out_list = []
+            neg_stu_sup_out_list = []
+            pos_stu_sup_out_list = []
+
+            neg_speed_list = []
+            pos_speed_list = []
+
             for idx, sup_data_ in enumerate(sup_data):
                 last_frame = torch.unsqueeze(sup_data_[-1, :, :, :], 0).repeat(num_of_gpu, 1, 1, 1)
                 sup_data_ = torch.cat((sup_data_, last_frame), 0) # [T,C,H,W]
-                strong_sup_aug , speed = self.transform(auginfo, sup_data_.permute(0, 2, 3, 1).cpu().numpy()) # [T,H,W,C]
+                neg_sup_aug , speed = self.transform(neg_auginfo, sup_data_.permute(0,2,3,1).cpu().numpy()) # [C,T,H,W]
+                neg_speed_list.append(speed)
+
+                pos_sup_aug , speed = self.transform(pos_auginfo, sup_data_.permute(1, 0, 2, 3).cpu().numpy()) # [C,T,H,W]
+                pos_speed_list.append(speed)
+
                 ema_sup_out = self.model_ema(sup_data_)
-                stu_sup_out = model(strong_sup_aug.permute(1, 0, 2, 3))
+                neg_stu_sup_out = model(neg_sup_aug.permute(1, 0, 2, 3))
+                pos_stu_sup_out = model(pos_sup_aug.permute(1, 0, 2, 3))
 
-                l_sup = sum(abs(stu_sup_out - ema_sup_out) * instance_weight[idx])
-                l_sup_list.append(l_sup)
+                fps = float(30)
+                low_hz = float(0.66666667)
+                high_hz = float(3.0)
 
-        l = l_sup.mean()
+                ema_sup_out = tent.torch_detrend(torch.cumsum(ema_sup_out, axis=0), torch.tensor(100.0))
+                neg_stu_sup_out = tent.torch_detrend(torch.cumsum(neg_stu_sup_out, axis=0), torch.tensor(100.0))
+                pos_stu_sup_out = tent.torch_detrend(torch.cumsum(pos_stu_sup_out, axis=0), torch.tensor(100.0))
+
+                ema_sup_out_list.append(ema_sup_out)
+                neg_stu_sup_out_list.append(neg_stu_sup_out)
+                pos_stu_sup_out_list.append(pos_stu_sup_out)
+
+            neg_speed_list = torch.tensor(neg_speed_list)
+            pos_speed_list = torch.tensor(pos_speed_list)
+
+
+            ema_sup_out_list = torch.stack(ema_sup_out_list)
+            neg_stu_sup_out_list = torch.stack(neg_stu_sup_out_list)
+            pos_stu_sup_out_list = torch.stack(pos_stu_sup_out_list)
+
+            ema_freqs, ema_psd = tent.torch_power_spectral_density(ema_sup_out_list, fps=fps, low_hz=low_hz,
+                                                                   high_hz=high_hz, normalize=False, bandpass=False)
+
+            neg_stu_freqs, neg_stu_psd = tent.torch_power_spectral_density(neg_stu_sup_out_list, fps=fps, low_hz=low_hz,
+                                                                   high_hz=high_hz,
+                                                                   normalize=False, bandpass=False)
+
+            pos_stu_freqs, pos_stu_psd = tent.torch_power_spectral_density(pos_stu_sup_out_list, fps=fps, low_hz=low_hz,
+                                                                          high_hz=high_hz,
+                                                                          normalize=False, bandpass=False)
+
+            ema_psd = tent.normalize_psd(ema_psd)
+            neg_stu_psd = tent.normalize_psd(neg_stu_psd)
+            pos_stu_psd = tent.normalize_psd(pos_stu_psd)
+
+
+            criterion = torch.nn.CrossEntropyLoss()
+
+            y_pred = batched_normed_psd(pos_stu_psd,neg_stu_psd)
+            y_labels = label_distance(pos_speed_list, neg_speed_list)
+            simper_loss = criterion (y_pred,y_labels.cuda())
+            #print (y_labels.dim)
+            #print (simper_loss)
+
+
+            """
+            plt.plot(ema_psd[0].detach().cpu().numpy())
+            plt.plot(neg_stu_psd[0].detach().cpu().numpy())
+            plt.plot(pos_stu_psd[0].detach().cpu().numpy())
+            plt.show()
+            """
+
+            bandwidth_loss = sinc_loss.IPR_SSL(pos_stu_freqs, pos_stu_psd, speed=pos_speed_list, low_hz=low_hz,
+                                               high_hz=high_hz, device='cuda:0')
+            variance_loss = sinc_loss.EMD_SSL(pos_stu_freqs, pos_stu_psd, speed=pos_speed_list, low_hz=low_hz,
+                                              high_hz=high_hz, device='cuda:0')
+            sparsity_loss = sinc_loss.SNR_SSL(pos_stu_freqs, pos_stu_psd, speed=pos_speed_list, low_hz=low_hz,
+                                              high_hz=high_hz, device='cuda:0')
+
+            pos_sinc_loss_total = bandwidth_loss + variance_loss + sparsity_loss
+
+            bandwidth_loss = sinc_loss.IPR_SSL(neg_stu_freqs, neg_stu_psd, speed=neg_speed_list, low_hz=low_hz,
+                                               high_hz=high_hz, device='cuda:0')
+            variance_loss = sinc_loss.EMD_SSL(neg_stu_freqs, neg_stu_psd, speed=neg_speed_list, low_hz=low_hz,
+                                              high_hz=high_hz, device='cuda:0')
+            sparsity_loss = sinc_loss.SNR_SSL(neg_stu_freqs, neg_stu_psd, speed=neg_speed_list, low_hz=low_hz,
+                                              high_hz=high_hz, device='cuda:0')
+
+
+            neg_sinc_loss_total = bandwidth_loss + variance_loss + sparsity_loss
+
+            #sinc_loss_total =  neg_sinc_loss_total
+            sinc_loss_total = pos_sinc_loss_total + neg_sinc_loss_total
+            #l_consistency = sum(abs(stu_sup_out - ema_sup_out) * instance_weight[idx])
+            l_kld_consistency = kld_loss((pos_stu_psd+1e-10).log(),ema_psd)
+
+            print ("pos_sinc_loss_total:", pos_sinc_loss_total)
+            print ("neg_sinc_loss_total:", neg_sinc_loss_total)
+            print ("l_kld_consistency:", l_kld_consistency)
+            print("simper_loss:", simper_loss)
+
+
+        l = sinc_loss_total  + l_kld_consistency + simper_loss
+        #l = l_kld_consistency
         print(l)
         if l is not None:
             optimizer.zero_grad()
             l.backward()
             optimizer.step()
 
+        """
+        for name, param in model.named_parameters():
+            if has_parameter_changed(initial_params[name], param):
+                print(f"Parameter '{name}' has changed during training.")
+            else:
+                print(f"Parameter '{name}' remains unchanged.")
+        """
         self.update_ema_variables(self.model_ema, self.model, self.nu)
 
     @staticmethod
@@ -128,7 +260,15 @@ class RoTTA(BaseAdapter):
         model.requires_grad_(False)
         normlayer_names = []
 
+        motion_convs = []
+
         for name, sub_module in model.named_modules():
+            """
+            print (name)
+            if name.find('apperance_att_conv1')!=-1:
+                target_layer = get_named_submodule(model, name)
+                target_layer.requires_grad_(True)
+            """
             if isinstance(sub_module, nn.BatchNorm1d) or isinstance(sub_module, nn.BatchNorm2d):
                 normlayer_names.append(name)
 
@@ -153,3 +293,5 @@ def timeliness_reweighting(ages):
         ages = torch.tensor(ages).float().cuda()
     return torch.exp(-ages) / (1 + torch.exp(-ages))
 
+def has_parameter_changed(initial, current):
+    return not torch.all(torch.eq(initial, current))

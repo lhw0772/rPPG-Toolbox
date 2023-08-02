@@ -111,9 +111,8 @@ class Tent(nn.Module):
         if self.episodic:
             self.reset()
 
-        """
         for _ in range(self.steps):
-            outputs , loss_val = forward_and_adapt(x, y , self.model, self.optimizer)
+            outputs  = forward_and_adapt(x, y , self.model, self.optimizer)
         """
 
         loss_val = get_loss(x,self.model)
@@ -132,7 +131,7 @@ class Tent(nn.Module):
                 loss_val = get_loss(x, self.model)
                 print (loss_val)
                 iter+=1
-
+        """
 
         return outputs
 
@@ -247,22 +246,29 @@ def forward_and_adapt(x, y, model, optimizer):
         #model.train()
         auginfo = Auginfo(x.shape[0])
 
-        x_aug, speed = sinc_aug.apply_transformations(auginfo, x.permute(0,2,3,1).cpu().numpy()) # [C,T,H,W]
-        predictions = model(x_aug.permute(1,0,2,3))
+        prediction_list = []
 
-        predictions_smooth = torch_detrend(torch.cumsum(predictions, axis=0), torch.tensor(100.0))
+        aug_num = 5
 
-        #predictions_batch = predictions_smooth.view(-1,180)
-        predictions_batch = predictions_smooth.T
+        for iter in range(aug_num):
+            x_aug, speed = sinc_aug.apply_transformations(auginfo, x.permute(0,2,3,1).cpu().numpy()) # [C,T,H,W]
+            predictions = model(x_aug.permute(1,0,2,3))
+            predictions_smooth = torch_detrend(torch.cumsum(predictions, axis=0), torch.tensor(100.0))
+            prediction_list.append(predictions_smooth)
+
+        prediction_list = torch.stack(prediction_list)
+
+        predictions_batch = prediction_list.view(-1,180)
+        #predictions_batch = predictions_smooth.T
 
         freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
                                                   normalize=False, bandpass=False)
-        speed = torch.tensor([speed]*4)
+        speed = torch.tensor([speed]*4*aug_num)
 
         bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
         variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
         sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
-        #print ("bandwidth_loss:",bandwidth_loss,"sparsity_loss:",sparsity_loss,"variance_loss:",variance_loss)
+        print ("bandwidth_loss:",bandwidth_loss,"sparsity_loss:",sparsity_loss,"variance_loss:",variance_loss)
 
         sinc_total_loss  = bandwidth_loss + variance_loss + sparsity_loss
         total_loss += sinc_total_loss
@@ -278,8 +284,6 @@ def forward_and_adapt(x, y, model, optimizer):
         else:
             print(f"Parameter '{name}' remains unchanged.")
     """
-
-    #predictions_ = model(x)
     return predictions_
 
 
@@ -325,12 +329,12 @@ def configure_model(model):
     # configure norm for tent updates: enable grad + force batch statisics
     for name, m in model.named_modules():
 
-        print (name)
-
-        if name.find('apperance_att_conv1') != -1:
+        # print (name)
+        """
+        if name.find('motion_conv1') != -1:
             target_layer = get_named_submodule(model, name)
             target_layer.requires_grad_(True)
-
+        """
         if isinstance(m, nn.BatchNorm2d):
             m.requires_grad_(True)
             # force use of batch stats in train and eval modes

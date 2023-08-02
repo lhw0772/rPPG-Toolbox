@@ -233,7 +233,7 @@ class RoTTA(BaseAdapter):
             print("simper_loss:", simper_loss)
 
 
-        l = sinc_loss_total  + l_kld_consistency + simper_loss
+        l = sinc_loss_total  + l_kld_consistency  + simper_loss
         #l = l_kld_consistency
         print(l)
         if l is not None:
@@ -260,13 +260,13 @@ class RoTTA(BaseAdapter):
 
         model.requires_grad_(False)
         normlayer_names = []
-
         motion_convs = []
 
         for name, sub_module in model.named_modules():
-            """
+
             print (name)
-            if name.find('apperance_att_conv1')!=-1:
+            """
+            if name.find('motion_conv1')!=-1:
                 target_layer = get_named_submodule(model, name)
                 target_layer.requires_grad_(True)
             """

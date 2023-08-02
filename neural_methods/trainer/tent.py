@@ -244,26 +244,38 @@ def forward_and_adapt(x, y, model, optimizer):
 
     if SINC:
         #model.train()
-        auginfo = Auginfo(x.shape[0])
 
         prediction_list = []
 
-        aug_num = 5
+        aug_num = 1
+        window_size = 180
+        auginfo = Auginfo(window_size+1)
 
-        for iter in range(aug_num):
-            x_aug, speed = sinc_aug.apply_transformations(auginfo, x.permute(0,2,3,1).cpu().numpy()) # [C,T,H,W]
-            predictions = model(x_aug.permute(1,0,2,3))
-            predictions_smooth = torch_detrend(torch.cumsum(predictions, axis=0), torch.tensor(100.0))
-            prediction_list.append(predictions_smooth)
+        x = x[:-1].view(-1, window_size, 3, 72, 72)
+        bs = x.shape[0]
+
+        speed_list = []
+
+        for idx in range(bs):
+            for iter in range(aug_num):
+                data_test = x[idx]
+                last_frame = torch.unsqueeze(data_test[-1, :, :, :], 0).repeat(1, 1, 1, 1)
+                data_test = torch.cat((data_test, last_frame), 0)
+                x_aug, speed = sinc_aug.apply_transformations(auginfo, data_test.permute(0,2,3,1).cpu().numpy()) # [T,H,W,C]
+                predictions = model(x_aug.permute(1,0,2,3))
+                predictions_smooth = torch_detrend(torch.cumsum(predictions, axis=0), torch.tensor(100.0))
+                prediction_list.append(predictions_smooth)
+
+                speed_list.append(speed)
 
         prediction_list = torch.stack(prediction_list)
 
-        predictions_batch = prediction_list.view(-1,180)
+        predictions_batch = prediction_list.view(-1, window_size)
         #predictions_batch = predictions_smooth.T
 
         freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
                                                   normalize=False, bandpass=False)
-        speed = torch.tensor([speed]*4*aug_num)
+        speed = torch.tensor(speed_list)
 
         bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
         variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')

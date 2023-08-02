@@ -7,9 +7,9 @@ import torch.jit
 import torch
 import torch.fft as fft
 
-import transforms
-import sinc_aug
-import sinc_loss
+import neural_methods.augmentation.transforms as transforms
+import neural_methods.augmentation.sinc_aug as sinc_aug
+import neural_methods.loss.sinc_loss as sinc_loss
 
 import matplotlib.pyplot as plt
 
@@ -17,7 +17,7 @@ from evaluation.post_process import _detrend, calculate_metric_per_video
 from scipy.signal import butter
 import scipy
 import numpy as np
-from utils.utils import set_named_submodule, get_named_submodule
+from neural_methods.utils.utils import set_named_submodule, get_named_submodule
 
 EPSILON = 1e-10
 BP_LOW=2/3

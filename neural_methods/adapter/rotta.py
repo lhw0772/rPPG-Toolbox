@@ -2,15 +2,16 @@ import torch
 import torch.nn as nn
 
 import config
-from utils import memory
-from base_adapter import BaseAdapter
+from neural_methods.utils import memory
+from neural_methods.adapter.base_adapter import BaseAdapter
 from copy import deepcopy
-from base_adapter import softmax_entropy
-from utils.bn_layers import RobustBN1d, RobustBN2d
-from utils.utils import set_named_submodule, get_named_submodule
-from utils.custom_transforms import get_tta_transforms
-import sinc_aug, sinc_loss
-import tent
+from neural_methods.adapter.base_adapter import softmax_entropy
+from neural_methods.utils.bn_layers import RobustBN1d, RobustBN2d
+from neural_methods.utils.utils import set_named_submodule, get_named_submodule
+from neural_methods.utils.custom_transforms import get_tta_transforms
+import neural_methods.augmentation.sinc_aug as sinc_aug
+import neural_methods.loss.sinc_loss as sinc_loss
+import neural_methods.trainer.tent as tent
 import matplotlib.pyplot as plt
 
 

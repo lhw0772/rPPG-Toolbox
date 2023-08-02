@@ -1,4 +1,4 @@
-import transforms
+import neural_methods.augmentation.transforms as transforms
 import torch
 
 def apply_transformations(self, clip, augment=True):

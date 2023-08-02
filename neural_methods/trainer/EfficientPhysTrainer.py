@@ -13,12 +13,12 @@ from neural_methods.model.EfficientPhys import EfficientPhys
 from neural_methods.trainer.BaseTrainer import BaseTrainer
 from tqdm import tqdm
 
-import tent
-import norm
+import neural_methods.trainer.tent as tent
+import neural_methods.trainer.norm as norm
 
-from adapter import build_adapter
-import sinc_loss
-import sinc_aug
+from neural_methods.adapter import build_adapter
+import neural_methods.augmentation.sinc_aug as sinc_aug
+import neural_methods.loss.sinc_loss as sinc_loss
 
 class EfficientPhysTrainer(BaseTrainer):
 
@@ -416,7 +416,7 @@ class EfficientPhysTrainer(BaseTrainer):
                                                           high_hz=high_hz,
                                                           normalize=False, bandpass=False)
 
-                speed = torch.tensor([speed]*8)
+                speed = torch.tensor([speed]*16)
 
                 bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz,
                                                    device='cuda:0')

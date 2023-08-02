@@ -1,0 +1,1 @@
+python main.py --config_file configs/train_configs/MMPD_MMPD_EFFICIENTPHYS.yaml

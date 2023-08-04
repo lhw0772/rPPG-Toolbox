@@ -109,23 +109,44 @@ def calculate_metrics(predictions, labels, config):
             if metric == "MAE":
                 MAE_FFT = np.mean(np.abs(predict_hr_fft_all - gt_hr_fft_all))
                 standard_error = np.std(np.abs(predict_hr_fft_all - gt_hr_fft_all)) / np.sqrt(num_test_samples)
+
+                MAE_FFT = round(MAE_FFT, 2)
+                standard_error = round(standard_error, 2)
+
                 print("FFT MAE (FFT Label): {0} +/- {1}".format(MAE_FFT, standard_error))
             elif metric == "RMSE":
                 RMSE_FFT = np.sqrt(np.mean(np.square(predict_hr_fft_all - gt_hr_fft_all)))
                 standard_error = np.std(np.square(predict_hr_fft_all - gt_hr_fft_all)) / np.sqrt(num_test_samples)
+
+                RMSE_FFT = round(RMSE_FFT, 2)
+                standard_error = round(standard_error, 2)
+
                 print("FFT RMSE (FFT Label): {0} +/- {1}".format(RMSE_FFT, standard_error))
             elif metric == "MAPE":
                 MAPE_FFT = np.mean(np.abs((predict_hr_fft_all - gt_hr_fft_all) / gt_hr_fft_all)) * 100
                 standard_error = np.std(np.abs((predict_hr_fft_all - gt_hr_fft_all) / gt_hr_fft_all)) / np.sqrt(num_test_samples) * 100
+
+                MAPE_FFT = round(MAPE_FFT, 2)
+                standard_error = round(standard_error, 2)
+
+
                 print("FFT MAPE (FFT Label): {0} +/- {1}".format(MAPE_FFT, standard_error))
             elif metric == "Pearson":
                 Pearson_FFT = np.corrcoef(predict_hr_fft_all, gt_hr_fft_all)
                 correlation_coefficient = Pearson_FFT[0][1]
                 standard_error = np.sqrt((1 - correlation_coefficient**2) / (num_test_samples - 2))
+
+                correlation_coefficient = round(correlation_coefficient, 2)
+                standard_error = round(standard_error, 2)
+
                 print("FFT Pearson (FFT Label): {0} +/- {1}".format(correlation_coefficient, standard_error))
             elif metric == "SNR":
                 SNR_FFT = np.mean(SNR_all)
                 standard_error = np.std(SNR_all) / np.sqrt(num_test_samples)
+
+                SNR_FFT = round(SNR_FFT,2)
+                standard_error = round(standard_error, 2)
+
                 print("FFT SNR (FFT Label): {0} +/- {1} (dB)".format(SNR_FFT, standard_error))
             elif "AU" in metric:
                 pass

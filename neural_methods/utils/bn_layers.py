@@ -60,3 +60,21 @@ class RobustBN2d(MomentumBN):
         bias = self.bias.view(1, -1, 1, 1)
 
         return x * weight + bias
+
+
+class RobustBN3d(MomentumBN):
+    def forward(self, x):
+        if self.training:
+            b_var, b_mean = torch.var_mean(x, dim=[0, 2, 3, 4], unbiased=False, keepdim=False)  # (C,)
+            mean = (1 - self.momentum) * self.source_mean + self.momentum * b_mean
+            var = (1 - self.momentum) * self.source_var + self.momentum * b_var
+            self.source_mean, self.source_var = deepcopy(mean.detach()), deepcopy(var.detach())
+            mean, var = mean.view(1, -1, 1, 1, 1), var.view(1, -1, 1, 1, 1)
+        else:
+            mean, var = self.source_mean.view(1, -1, 1, 1, 1), self.source_var.view(1, -1, 1, 1, 1)
+
+        x = (x - mean) / torch.sqrt(var + self.eps)
+        weight = self.weight.view(1, -1, 1, 1, 1)
+        bias = self.bias.view(1, -1, 1, 1, 1)
+
+        return x * weight + bias

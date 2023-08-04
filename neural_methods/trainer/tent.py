@@ -18,6 +18,7 @@ from scipy.signal import butter
 import scipy
 import numpy as np
 from neural_methods.utils.utils import set_named_submodule, get_named_submodule
+import time
 
 EPSILON = 1e-10
 BP_LOW=2/3
@@ -92,7 +93,7 @@ class Tent(nn.Module):
 
     Once tented, a model adapts itself by updating on every forward.
     """
-    def __init__(self, model, optimizer, steps=1, episodic=False):
+    def __init__(self, model, optimizer, steps=1, episodic=False, model_name='None' ):
         super().__init__()
         self.model = model
         self.optimizer = optimizer
@@ -106,13 +107,14 @@ class Tent(nn.Module):
             copy_model_and_optimizer(self.model, self.optimizer)
 
         self.log_list = []
+        self.model_name = model_name
 
     def forward(self, x , y):
         if self.episodic:
             self.reset()
 
         for _ in range(self.steps):
-            outputs  = forward_and_adapt(x, y , self.model, self.optimizer)
+            outputs  = forward_and_adapt(x, y , self.model, self.optimizer, self.model_name)
         """
 
         loss_val = get_loss(x,self.model)
@@ -182,14 +184,40 @@ def get_loss(x,model):
     variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
     sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
 
-    batch_total_loss = bandwidth_loss + variance_loss + sparsity_loss
+    batch_total_loss = bandwidth_loss + sparsity_loss +variance_loss
+    test_loss = batch_total_loss.detach().cpu().numpy()
+
+    return test_loss
+
+
+def get_loss_3d(x,model):
+
+    fps = float(30)
+    low_hz = float(0.66666667)
+    high_hz = float(3.0)
+
+    predictions_, _, _, _  = model(x)
+    predictions_smooth = torch_detrend(torch.cumsum(predictions_.T, axis=0), torch.tensor(100.0))
+
+    # predictions_batch = predictions_smooth.view(-1,180)
+    predictions_batch = predictions_smooth.T
+
+    freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                              normalize=False, bandpass=False)
+    speed = torch.tensor([1.0] * psd.shape[0])
+
+    bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+    variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+    sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+
+    batch_total_loss = bandwidth_loss + sparsity_loss # +variance_loss
     test_loss = batch_total_loss.detach().cpu().numpy()
 
     return test_loss
 
 
 @torch.enable_grad()  # ensure grads in possible no grad context for testing
-def forward_and_adapt(x, y, model, optimizer):
+def forward_and_adapt(x, y, model, optimizer, model_name):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
@@ -198,7 +226,15 @@ def forward_and_adapt(x, y, model, optimizer):
     total_loss = 0.0
 
     MC_DROP = 0
-    SINC = 1
+    SINC = 0
+    SINC_ORIGIN = 0
+    SINC_3d = 0
+
+
+    if model_name == 'EfficientPhys':
+        SINC_ORIGIN = 1
+    elif model_name == 'Physnet':
+        SINC_3d = 1
 
 
     fps = float(30)
@@ -208,9 +244,32 @@ def forward_and_adapt(x, y, model, optimizer):
     #initial_params = [param.clone().detach() for param in model.parameters()]
 
     # Save the initial parameters along with their names
-    initial_params = {name: param.clone().detach() for name, param in model.named_parameters()}
+    #initial_params = {name: param.clone().detach() for name, param in model.named_parameters()}
 
     predictions_ = model(x)
+
+
+    if SINC_3d :
+        origin_input_error = get_loss_3d(x,model)
+        print (origin_input_error)
+        iter_num = int((origin_input_error*10)**2)-20
+        if iter_num <0:
+            iter_num =1
+
+
+    """
+    model.eval()
+    loss_ = get_loss(x, model)
+    model.train()
+    """
+
+    """
+    for name, param in model.named_parameters():
+        if has_parameter_changed(initial_params[name], param):
+            print(f"Parameter '{name}' has changed during training.")
+        else:
+            print(f"Parameter '{name}' remains unchanged.")
+    """
 
 
     if MC_DROP:
@@ -242,31 +301,69 @@ def forward_and_adapt(x, y, model, optimizer):
             self.speed_slow = 0.6
             self.speed_fast = 1.0 # self.speed_fast = 1.4
 
+    if SINC_ORIGIN:
+        # model.train()
+        auginfo = Auginfo(x.shape[0])
+
+        x_aug, speed = sinc_aug.apply_transformations(auginfo, x.permute(0, 2, 3, 1).cpu().numpy())  # [C,T,H,W]
+        predictions = model(x_aug.permute(1, 0, 2, 3))
+        predictions_smooth = torch_detrend(torch.cumsum(predictions, axis=0), torch.tensor(100.0))
+
+
+        # predictions_batch = predictions_smooth.view(-1, 180)
+        predictions_batch = predictions_smooth.T
+
+        freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                  normalize=False, bandpass=False)
+
+        #speed = torch.tensor([speed]*4)
+        speed = torch.tensor([speed])
+
+        bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+        variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+        sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+        print("bandwidth_loss:", bandwidth_loss, "sparsity_loss:", sparsity_loss, "variance_loss:", variance_loss)
+
+        sinc_total_loss = bandwidth_loss + variance_loss + sparsity_loss
+        total_loss += sinc_total_loss
+
+
     if SINC:
         #model.train()
 
         prediction_list = []
 
+        iter_num = 1
         aug_num = 1
         window_size = 180
         auginfo = Auginfo(window_size+1)
 
-        x = x[:-1].view(-1, window_size, 3, 72, 72)
-        bs = x.shape[0]
+        x_copy = x[:-1].view(-1, window_size, 3, 72, 72).clone()
+        bs = x_copy.shape[0]
 
         speed_list = []
 
-        for idx in range(bs):
-            for iter in range(aug_num):
-                data_test = x[idx]
-                last_frame = torch.unsqueeze(data_test[-1, :, :, :], 0).repeat(1, 1, 1, 1)
-                data_test = torch.cat((data_test, last_frame), 0)
-                x_aug, speed = sinc_aug.apply_transformations(auginfo, data_test.permute(0,2,3,1).cpu().numpy()) # [T,H,W,C]
-                predictions = model(x_aug.permute(1,0,2,3))
-                predictions_smooth = torch_detrend(torch.cumsum(predictions, axis=0), torch.tensor(100.0))
+
+        if aug_num >0:
+            for idx in range(bs):
+                for iter in range(aug_num):
+                    data_test = x_copy[idx]
+                    last_frame = torch.unsqueeze(data_test[-1, :, :, :], 0).repeat(1, 1, 1, 1)
+                    data_test = torch.cat((data_test, last_frame), 0)
+                    x_aug, speed = sinc_aug.apply_transformations(auginfo, data_test.permute(0,2,3,1).cpu().numpy()) # [T,H,W,C]
+                    predictions = model(x_aug.permute(1,0,2,3))
+                    predictions_smooth = torch_detrend(torch.cumsum(predictions, axis=0), torch.tensor(100.0))
+                    prediction_list.append(predictions_smooth)
+
+                    speed_list.append(speed)
+        else:
+            for iter in range(iter_num):
+                predictions_smooth = torch_detrend(torch.cumsum(predictions_, axis=0), torch.tensor(100.0))
                 prediction_list.append(predictions_smooth)
 
-                speed_list.append(speed)
+                for _ in range(bs):
+                    speed_list.append(1.0)
+
 
         prediction_list = torch.stack(prediction_list)
 
@@ -285,9 +382,52 @@ def forward_and_adapt(x, y, model, optimizer):
         sinc_total_loss  = bandwidth_loss + variance_loss + sparsity_loss
         total_loss += sinc_total_loss
 
-    optimizer.zero_grad()
-    total_loss.backward()
-    optimizer.step()
+    if SINC_3d:
+        for iter in range(iter_num):
+
+            total_loss = 0.0
+            auginfo = Auginfo(x.shape[2])
+
+            prediction_list = []
+            speed_list = []
+
+            for data in x:
+                x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
+                predictions, _, _, _  = model(x_aug.unsqueeze(0).cuda())
+
+                predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
+                prediction_list.append(predictions_smooth)
+                speed_list.append(speed)
+                del x_aug,predictions
+
+
+            prediction_list = torch.stack(prediction_list)
+            predictions_batch = prediction_list.view(-1, 128)
+            speed = torch.tensor(speed_list)
+
+            freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                      normalize=False, bandpass=False)
+
+            bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+            variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+            sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+            print("bandwidth_loss:", bandwidth_loss, "sparsity_loss:", sparsity_loss, "variance_loss:", variance_loss)
+
+            sinc_total_loss = bandwidth_loss + variance_loss + sparsity_loss
+            total_loss += sinc_total_loss
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+
+            input_error = get_loss_3d(x, model)
+            print(origin_input_error,"->",input_error)
+
+
+    if SINC_ORIGIN or SINC :
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
 
     """
     for name, param in model.named_parameters():
@@ -296,6 +436,18 @@ def forward_and_adapt(x, y, model, optimizer):
         else:
             print(f"Parameter '{name}' remains unchanged.")
     """
+    """
+    model.eval()
+    predictions_new = model(x)
+    loss_new = get_loss(x, model)
+
+    if loss_ >  loss_new:
+        last_prediction = predictions_new
+        print ('new predict', loss_-loss_new)
+    else:
+        last_prediction = predictions_
+    """
+
     return predictions_
 
 
@@ -347,7 +499,7 @@ def configure_model(model):
             target_layer = get_named_submodule(model, name)
             target_layer.requires_grad_(True)
         """
-        if isinstance(m, nn.BatchNorm2d):
+        if isinstance(m, nn.BatchNorm2d) or isinstance(m,nn.BatchNorm3d):
             m.requires_grad_(True)
             # force use of batch stats in train and eval modes
             m.track_running_stats = False

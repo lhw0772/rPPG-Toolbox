@@ -250,7 +250,8 @@ class EfficientPhysTrainer(BaseTrainer):
         optimizer = self.setup_optimizer(params)
         tent_model = tent.Tent(model, optimizer,
                                steps=self.config.OPTIM.STEPS,
-                               episodic=self.config.MODEL.EPISODIC)
+                               episodic=self.config.MODEL.EPISODIC,
+                               model_name = self.config.MODEL.NAME)
         #logger.info(f"model for adaptation: %s", model)
         #logger.info(f"params for adaptation: %s", param_names)
         #logger.info(f"optimizer for adaptation: %s", optimizer)
@@ -318,8 +319,6 @@ class EfficientPhysTrainer(BaseTrainer):
         print("Testing uses pretrained model!")
 
         self.model = self.model.to(self.config.DEVICE)
-        #self.model = self.setup_tent(self.model)
-
         optimizer = build_optimizer(self.config)
         tta_adapter = build_adapter(self.config)
         self.model = tta_adapter(self.config, self.model, optimizer).cuda()

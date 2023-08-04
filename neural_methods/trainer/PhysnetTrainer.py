@@ -12,6 +12,8 @@ from neural_methods.trainer.BaseTrainer import BaseTrainer
 from torch.autograd import Variable
 from tqdm import tqdm
 
+import neural_methods.trainer.tent as tent
+from neural_methods.adapter import build_adapter
 
 class PhysnetTrainer(BaseTrainer):
 
@@ -179,3 +181,152 @@ class PhysnetTrainer(BaseTrainer):
             self.model_dir, self.model_file_name + '_Epoch' + str(index) + '.pth')
         torch.save(self.model.state_dict(), model_path)
         print('Saved Model Path: ', model_path)
+
+    def setup_optimizer(self, params):
+        """Set up optimizer for tent adaptation.
+
+        Tent needs an optimizer for test-time entropy minimization.
+        In principle, tent could make use of any gradient optimizer.
+        In practice, we advise choosing Adam or SGD+momentum.
+        For optimization settings, we advise to use the settings from the end of
+        trainig, if known, or start with a low learning rate (like 0.001) if not.
+
+        For best results, try tuning the learning rate and batch size.
+        """
+        if self.config.OPTIM.METHOD == 'Adam':
+            return optim.Adam(params,
+                              lr=self.config.OPTIM.LR,
+                              betas=(self.config.OPTIM.BETA, 0.999),
+                              weight_decay=self.config.OPTIM.WD)
+        elif self.config.OPTIM.METHOD == 'SGD':
+            return optim.SGD(params,
+                             lr=self.config.OPTIM.LR,
+                             momentum=self.config.OPTIM.MOMENTUM,
+                             dampening=self.config.OPTIM.DAMPENING,
+                             weight_decay=self.config.OPTIM.WD,
+                             nesterov=self.config.OPTIM.NESTEROV)
+        else:
+            raise NotImplementedError
+
+    def setup_tent(self, model):
+        """Set up tent adaptation.
+
+        Configure the model for training + feature modulation by batch statistics,
+        collect the parameters for feature modulation by gradient optimization,
+        set up the optimizer, and then tent the model.
+        """
+        model = tent.configure_model(model)
+        params, param_names = tent.collect_params(model)
+        optimizer = self.setup_optimizer(params)
+        tent_model = tent.Tent(model, optimizer,
+                               steps=self.config.OPTIM.STEPS,
+                               episodic=self.config.MODEL.EPISODIC,
+                               model_name=self.config.MODEL.NAME)
+        # logger.info(f"model for adaptation: %s", model)
+        # logger.info(f"params for adaptation: %s", param_names)
+        # logger.info(f"optimizer for adaptation: %s", optimizer)
+        return tent_model
+
+    def tta_tent(self, data_loader):
+        """ Model evaluation on the testing dataset."""
+        if data_loader["test"] is None:
+            raise ValueError("No data for test")
+
+        print('')
+        print("===TTA===")
+        predictions = dict()
+        labels = dict()
+
+        if not os.path.exists(self.config.INFERENCE.MODEL_PATH):
+            raise ValueError("Inference model path error! Please check INFERENCE.MODEL_PATH in your yaml.")
+        self.model.load_state_dict(torch.load(self.config.INFERENCE.MODEL_PATH))
+        print("Testing uses pretrained model!")
+
+        self.model = self.model.to(self.config.DEVICE)
+        self.model = self.setup_tent(self.model)
+
+        #self.model.eval()
+        with torch.no_grad():
+            for _, test_batch in enumerate(data_loader['test']):
+                batch_size = test_batch[0].shape[0]
+                data, label = test_batch[0].to(
+                    self.config.DEVICE), test_batch[1].to(self.config.DEVICE)
+                pred_ppg_test, _, _, _ = self.model(data,label)
+
+                pred_ppg_test = pred_ppg_test.detach()
+
+                for idx in range(batch_size):
+                    subj_index = test_batch[2][idx]
+                    sort_index = int(test_batch[3][idx])
+                    if subj_index not in predictions.keys():
+                        predictions[subj_index] = dict()
+                        labels[subj_index] = dict()
+                    predictions[subj_index][sort_index] = pred_ppg_test[idx]
+                    labels[subj_index][sort_index] = label[idx]
+
+
+        print('')
+        calculate_metrics(predictions, labels, self.config)
+
+
+    def tta_rotta(self, data_loader):
+        """ Model evaluation on the testing dataset."""
+        if data_loader["test"] is None:
+            raise ValueError("No data for test")
+
+        print('')
+        print("===TTA===")
+        predictions = dict()
+        labels = dict()
+
+        if not os.path.exists(self.config.INFERENCE.MODEL_PATH):
+            raise ValueError("Inference model path error! Please check INFERENCE.MODEL_PATH in your yaml.")
+        self.model.load_state_dict(torch.load(self.config.INFERENCE.MODEL_PATH))
+        print("Testing uses pretrained model!")
+
+        self.model = self.model.to(self.config.DEVICE)
+        optimizer = build_optimizer(self.config)
+        tta_adapter = build_adapter(self.config)
+        self.model = tta_adapter(self.config, self.model, optimizer).cuda()
+
+        with torch.no_grad():
+            for _, test_batch in enumerate(data_loader['test']):
+                batch_size = test_batch[0].shape[0]
+                data, label = test_batch[0].to(
+                    self.config.DEVICE), test_batch[1].to(self.config.DEVICE)
+                pred_ppg_test = self.model(data)
+
+                pred_ppg_test = pred_ppg_test.detach()
+
+                for idx in range(batch_size):
+                    subj_index = test_batch[2][idx]
+                    sort_index = int(test_batch[3][idx])
+                    if subj_index not in predictions.keys():
+                        predictions[subj_index] = dict()
+                        labels[subj_index] = dict()
+                    predictions[subj_index][sort_index] = pred_ppg_test[idx]
+                    labels[subj_index][sort_index] = label[idx]
+
+
+        print('')
+        calculate_metrics(predictions, labels, self.config)
+
+
+def build_optimizer(cfg):
+    def optimizer(params):
+        if cfg.OPTIM.METHOD == 'Adam':
+            return optim.Adam(params,
+                              lr=cfg.OPTIM.LR,
+                              betas=(cfg.OPTIM.BETA, 0.999),
+                              weight_decay=cfg.OPTIM.WD)
+        elif cfg.OPTIM.METHOD == 'SGD':
+            return optim.SGD(params,
+                             lr=cfg.OPTIM.LR,
+                             momentum=cfg.OPTIM.MOMENTUM,
+                             dampening=cfg.OPTIM.DAMPENING,
+                             weight_decay=cfg.OPTIM.WD,
+                             nesterov=cfg.OPTIM.NESTEROV)
+        else:
+            raise NotImplementedError
+
+    return optimizer

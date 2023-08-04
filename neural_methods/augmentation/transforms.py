@@ -19,7 +19,9 @@ def arrange_channels(imgs, channels):
 
 def prepare_clip(clip, channels):
     #clip = arrange_channels(clip, channels) # [T,H,W,C]
-    clip = np.transpose(clip, (3, 0, 1, 2)) # [C,T,H,W]
+
+    if clip.shape[1] == clip.shape[2]: # this is 3d conv , it's already [C,T,H,W]
+        clip = np.transpose(clip, (3, 0, 1, 2)) # [C,T,H,W] # disable for 3d
     clip = clip.astype(np.float64)
     return clip
 

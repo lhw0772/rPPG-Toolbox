@@ -250,11 +250,15 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
 
 
     if SINC_3d :
+
+        iter_num = 1
+        """
         origin_input_error = get_loss_3d(x,model)
         print (origin_input_error)
         iter_num = int((origin_input_error*10)**2)-20
         if iter_num <0:
             iter_num =1
+        """
 
 
     """
@@ -293,8 +297,8 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
             self.aug_speed = 1
             self.aug_flip = 1
             self.aug_reverse = 1
-            self.aug_illum = 1
-            self.aug_gauss = 1
+            self.aug_illum = 0
+            self.aug_gauss = 0
             self.aug_resizedcrop = 1
             self.frames_per_clip = frame_length #721
             self.channels = 'rgb'
@@ -392,13 +396,14 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
             speed_list = []
 
             for data in x:
-                x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
-                predictions, _, _, _  = model(x_aug.unsqueeze(0).cuda())
+                #x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
+                #speed_list.append(speed)
+                #predictions, _, _, _  = model(x_aug.unsqueeze(0).cuda())
+                predictions, _, _, _ = model(data.unsqueeze(0))
 
                 predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
                 prediction_list.append(predictions_smooth)
-                speed_list.append(speed)
-                del x_aug,predictions
+                speed_list.append(1.0)
 
 
             prediction_list = torch.stack(prediction_list)
@@ -420,8 +425,8 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
             total_loss.backward()
             optimizer.step()
 
-            input_error = get_loss_3d(x, model)
-            print(origin_input_error,"->",input_error)
+            #input_error = get_loss_3d(x, model)
+            #print(origin_input_error,"->",input_error)
 
 
     if SINC_ORIGIN or SINC :

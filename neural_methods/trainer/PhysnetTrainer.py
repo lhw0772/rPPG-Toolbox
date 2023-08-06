@@ -14,6 +14,9 @@ from tqdm import tqdm
 
 import neural_methods.trainer.tent as tent
 from neural_methods.adapter import build_adapter
+import neural_methods.loss.sinc_loss as sinc_loss
+import neural_methods.trainer.tent as tent
+import neural_methods.augmentation.sinc_aug as sinc_aug
 
 class PhysnetTrainer(BaseTrainer):
 
@@ -310,6 +313,110 @@ class PhysnetTrainer(BaseTrainer):
 
         print('')
         calculate_metrics(predictions, labels, self.config)
+    
+    
+    def train_ssl(self,data_loader):
+        if os.path.exists(self.config.INFERENCE.MODEL_PATH):
+            self.model.load_state_dict(torch.load(self.config.INFERENCE.MODEL_PATH))
+            print("Traing SSL uses pretrained model!")     
+            
+        for epoch in range(self.max_epoch_num):
+            print('')
+            print(f"====Training Epoch: {epoch}====")
+            running_loss = 0.0
+            train_loss = []
+            self.model.train()
+            tbar = tqdm(data_loader["train"], ncols=80)
+            for idx, batch in enumerate(tbar):
+                tbar.set_description("Train epoch %s" % epoch)
+                #predictions_batch, x_visual, x_visual3232, x_visual1616 = self.model(
+                #    batch[0].to(torch.float32).to(self.device))
+                #BVP_label = batch[1].to(
+                #    torch.float32).to(self.device)
+                #rPPG = (rPPG - torch.mean(rPPG)) / torch.std(rPPG)  # normalize
+                #BVP_label = (BVP_label - torch.mean(BVP_label)) / \
+                #            torch.std(BVP_label)  # normalize
+                #loss = self.loss_model(rPPG, BVP_label)
+                
+                fps = float(30)
+                low_hz = float(0.66666667)
+                high_hz = float(3.0)
+                
+                
+                class Auginfo:
+                    def __init__(self, frame_length):
+                        self.aug_speed = 1
+                        self.aug_flip = 1
+                        self.aug_reverse = 1
+                        self.aug_illum = 1
+                        self.aug_gauss = 1
+                        self.aug_resizedcrop = 1
+                        self.frames_per_clip = frame_length  # 721
+                        self.channels = 'rgb'
+                        self.speed_slow = 0.6
+                        self.speed_fast = 1.0  # self.speed_fast = 1.4                
+                
+                #print (batch[0].shape) # [4, 3, 128, 72, 72]
+                total_loss = 0.0
+                auginfo = Auginfo(batch[0].shape[2])
+
+                prediction_list = []
+                speed_list = []
+
+                for data in batch[0]:
+                    
+                    if self.config.AUG :
+                        x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
+                        predictions, _, _, _  = self.model(x_aug.unsqueeze(0).cuda())
+                    else:
+                        speed = 1.0
+                        predictions, _, _, _ = self.model(data.unsqueeze(0).cuda())
+                    predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)  # normalize
+                    predictions_smooth = tent.torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
+                    prediction_list.append(predictions_smooth)
+                    speed_list.append(speed)
+              
+                prediction_list = torch.stack(prediction_list)
+                predictions_batch = prediction_list.view(-1, 128)
+                speed = torch.tensor(speed_list)
+   
+                
+                freqs, psd = tent.torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                      normalize=False, bandpass=False)
+
+                bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+                variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+                sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+
+                loss = bandwidth_loss+ variance_loss +sparsity_loss
+                
+                
+                loss.backward()
+                running_loss += loss.item()
+                if idx % 100 == 99:  # print every 100 mini-batches
+                    print(
+                        f'[{epoch}, {idx + 1:5d}] loss: {running_loss / 100:.3f}')
+                    running_loss = 0.0
+                train_loss.append(loss.item())
+                self.optimizer.step()
+                self.scheduler.step()
+                self.optimizer.zero_grad()
+                tbar.set_postfix(loss=loss.item())
+            self.save_model(epoch)
+            if not self.config.TEST.USE_LAST_EPOCH: 
+                valid_loss = self.valid(data_loader)
+                print('validation loss: ', valid_loss)
+                if self.min_valid_loss is None:
+                    self.min_valid_loss = valid_loss
+                    self.best_epoch = epoch
+                    print("Update best model! Best epoch: {}".format(self.best_epoch))
+                elif (valid_loss < self.min_valid_loss):
+                    self.min_valid_loss = valid_loss
+                    self.best_epoch = epoch
+                    print("Update best model! Best epoch: {}".format(self.best_epoch))
+        if not self.config.TEST.USE_LAST_EPOCH: 
+            print("best trained epoch: {}, min_val_loss: {}".format(
+                self.best_epoch, self.min_valid_loss))
 
 
 def build_optimizer(cfg):

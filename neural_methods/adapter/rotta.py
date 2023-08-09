@@ -177,11 +177,11 @@ class RoTTA(BaseAdapter):
                 num_of_gpu = 1
                 class Auginfo:
                     def __init__(self, frame_length):
-                        self.aug_speed = 1
+                        self.aug_speed = 0
                         self.aug_flip = 1
-                        self.aug_reverse = 1
-                        self.aug_illum = 1
-                        self.aug_gauss = 1
+                        self.aug_reverse = 0
+                        self.aug_illum = 0
+                        self.aug_gauss = 0
                         self.aug_resizedcrop = 1
                         self.frames_per_clip = frame_length  # 721
                         self.channels = 'rgb'
@@ -200,18 +200,14 @@ class RoTTA(BaseAdapter):
                 neg_stu_sup_out_list = []
                 pos_stu_sup_out_list = []
 
-                neg_speed_list = []
                 pos_speed_list = []
 
                 for idx, sup_data_ in enumerate(sup_data):
-                    neg_sup_aug , speed = self.transform(neg_auginfo, sup_data_.cpu().numpy()) # [C,T,H,W]
-                    neg_speed_list.append(speed)
 
                     pos_sup_aug , speed = self.transform(pos_auginfo, sup_data_.cpu().numpy()) # [C,T,H,W]
                     pos_speed_list.append(speed)
 
                     ema_sup_out,_,_,_ = self.model_ema(sup_data_.unsqueeze(0).cuda())
-                    neg_stu_sup_out,_,_,_ = model(neg_sup_aug.unsqueeze(0).cuda())
                     pos_stu_sup_out,_,_,_ = model(pos_sup_aug.unsqueeze(0).cuda())
 
                     fps = float(30)
@@ -219,11 +215,9 @@ class RoTTA(BaseAdapter):
                     high_hz = float(3.0)
 
                     ema_sup_out = tent.torch_detrend(torch.cumsum(ema_sup_out.T, axis=0), torch.tensor(100.0))
-                    neg_stu_sup_out = tent.torch_detrend(torch.cumsum(neg_stu_sup_out.T, axis=0), torch.tensor(100.0))
                     pos_stu_sup_out = tent.torch_detrend(torch.cumsum(pos_stu_sup_out.T, axis=0), torch.tensor(100.0))
 
                     ema_sup_out_list.append(ema_sup_out)
-                    neg_stu_sup_out_list.append(neg_stu_sup_out)
                     pos_stu_sup_out_list.append(pos_stu_sup_out)
 
                     stu_sup_out,_,_,_ = model(sup_data_.unsqueeze(0).cuda())
@@ -231,12 +225,10 @@ class RoTTA(BaseAdapter):
                     sup_out_lit.append(stu_sup_out)
 
 
-                neg_speed_list = torch.tensor(neg_speed_list)
                 pos_speed_list = torch.tensor(pos_speed_list)
 
 
                 ema_sup_out_list = torch.stack(ema_sup_out_list)
-                neg_stu_sup_out_list = torch.stack(neg_stu_sup_out_list)
                 pos_stu_sup_out_list = torch.stack(pos_stu_sup_out_list)
                 sup_out_lit = torch.stack(sup_out_lit)
 
@@ -246,17 +238,12 @@ class RoTTA(BaseAdapter):
                 ema_freqs, ema_psd = tent.torch_power_spectral_density(ema_sup_out_list, fps=fps, low_hz=low_hz,
                                                                        high_hz=high_hz, normalize=False, bandpass=False)
 
-                neg_stu_freqs, neg_stu_psd = tent.torch_power_spectral_density(neg_stu_sup_out_list, fps=fps, low_hz=low_hz,
-                                                                       high_hz=high_hz,
-                                                                       normalize=False, bandpass=False)
-
                 pos_stu_freqs, pos_stu_psd = tent.torch_power_spectral_density(pos_stu_sup_out_list, fps=fps, low_hz=low_hz,
                                                                               high_hz=high_hz,
                                                                               normalize=False, bandpass=False)
 
                 stu_psd = tent.normalize_psd(stu_psd)
                 ema_psd = tent.normalize_psd(ema_psd)
-                neg_stu_psd = tent.normalize_psd(neg_stu_psd)
                 pos_stu_psd = tent.normalize_psd(pos_stu_psd)
 
                 """
@@ -292,17 +279,8 @@ class RoTTA(BaseAdapter):
 
                 pos_sinc_loss_total = bandwidth_loss + variance_loss + sparsity_loss
 
-                bandwidth_loss = sinc_loss.IPR_SSL(neg_stu_freqs, neg_stu_psd, speed=neg_speed_list, low_hz=low_hz,
-                                                   high_hz=high_hz, device='cuda:0')
-                variance_loss = sinc_loss.EMD_SSL(neg_stu_freqs, neg_stu_psd, speed=neg_speed_list, low_hz=low_hz,
-                                                  high_hz=high_hz, device='cuda:0')
-                sparsity_loss = sinc_loss.SNR_SSL(neg_stu_freqs, neg_stu_psd, speed=neg_speed_list, low_hz=low_hz,
-                                                  high_hz=high_hz, device='cuda:0')
 
-
-                neg_sinc_loss_total = bandwidth_loss  + variance_loss + sparsity_loss
-
-                sinc_loss_total = pos_sinc_loss_total + neg_sinc_loss_total + origin_sinc_loss_total
+                sinc_loss_total = pos_sinc_loss_total  + origin_sinc_loss_total
                 #l_consistency = sum(abs(stu_sup_out - ema_sup_out) * instance_weight[idx])
 
                 l_kld_consistency = kld_loss((pos_stu_psd+1e-10).log(), ema_psd)
@@ -312,7 +290,6 @@ class RoTTA(BaseAdapter):
 
                 print("origin_sinc_loss_total:", origin_sinc_loss_total)
                 print ("pos_sinc_loss_total:", pos_sinc_loss_total)
-                print ("neg_sinc_loss_total:", neg_sinc_loss_total)
                 print ("l_kld_consistency:", l_kld_consistency)
                 #print("simper_loss:", simper_loss)
 

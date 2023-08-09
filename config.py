@@ -314,6 +314,7 @@ _C.INFERENCE.EVALUATION_WINDOW.USE_SMALLER_WINDOW = False
 _C.INFERENCE.EVALUATION_WINDOW.WINDOW_SIZE = 10
 _C.INFERENCE.MODEL_PATH = ''
 _C.INFERENCE.TTA = 'tent'
+_C.INFERENCE.AUG = False
 
 # -----------------------------------------------------------------------------
 # Device settings

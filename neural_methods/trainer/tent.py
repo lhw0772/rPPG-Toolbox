@@ -20,10 +20,22 @@ import numpy as np
 from neural_methods.utils.utils import set_named_submodule, get_named_submodule
 import time
 
+import wandb
+wandb.init(project='tent')
+wandb.run.name = 'tent-lre2-mmpd-novar'
+
 EPSILON = 1e-10
 BP_LOW=2/3
 BP_HIGH=3.0
 BP_DELTA=0.1
+
+import gc
+def find_nearest_index(tensor_list, value):
+    # 주어진 값과 리스트의 요소와의 차이를 계산하여 절대값을 취한 리스트 생성
+    absolute_diff = [abs(x - value) for x in tensor_list]
+    # 절대값이 가장 작은 인덱스 반환
+    nearest_index = absolute_diff.index(min(absolute_diff))
+    return nearest_index
 
 
 def torch_detrend(input_signal, lambda_value):
@@ -108,32 +120,21 @@ class Tent(nn.Module):
 
         self.log_list = []
         self.model_name = model_name
+        self.tta_fw_cnt = 0
+        self.tta_bw_cnt = 0
+        self.iter =0
 
     def forward(self, x , y):
         if self.episodic:
             self.reset()
 
         for _ in range(self.steps):
-            outputs  = forward_and_adapt(x, y , self.model, self.optimizer, self.model_name)
-        """
+            outputs ,(fw_cnt,bw_cnt) = forward_and_adapt(x, y , self.model, self.optimizer, self.model_name, self.iter)
 
-        loss_val = get_loss(x,self.model)
+            self.tta_fw_cnt += fw_cnt
+            self.tta_bw_cnt += bw_cnt
+            self.iter+=1
 
-        TH = 0.8
-        iter_max = 50
-        iter = 0
-
-        if loss_val< TH:
-            print ('pass')
-            outputs = forward_and_adapt(x, y, self.model, self.optimizer)
-        else:
-            print('update X ',iter_max)
-            while loss_val > TH and iter < iter_max:
-                outputs = forward_and_adapt(x, y, self.model, self.optimizer)
-                loss_val = get_loss(x, self.model)
-                print (loss_val)
-                iter+=1
-        """
 
         return outputs
 
@@ -217,11 +218,14 @@ def get_loss_3d(x,model):
 
 
 @torch.enable_grad()  # ensure grads in possible no grad context for testing
-def forward_and_adapt(x, y, model, optimizer, model_name):
+def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
     """
+
+    fw_cnt = 0
+    bw_cnt = 0
 
     total_loss = 0.0
 
@@ -229,6 +233,9 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
     SINC = 0
     SINC_ORIGIN = 0
     SINC_3d = 0
+
+    AUG = 0
+    ADAPTIVE_OPT = 1
 
 
     if model_name == 'EfficientPhys':
@@ -250,15 +257,7 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
 
 
     if SINC_3d :
-
         iter_num = 1
-        """
-        origin_input_error = get_loss_3d(x,model)
-        print (origin_input_error)
-        iter_num = int((origin_input_error*10)**2)-20
-        if iter_num <0:
-            iter_num =1
-        """
 
 
     """
@@ -294,9 +293,9 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
 
     class Auginfo:
         def __init__(self, frame_length):
-            self.aug_speed = 1
+            self.aug_speed = 0
             self.aug_flip = 1
-            self.aug_reverse = 1
+            self.aug_reverse = 0
             self.aug_illum = 0
             self.aug_gauss = 0
             self.aug_resizedcrop = 1
@@ -387,7 +386,14 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
         total_loss += sinc_total_loss
 
     if SINC_3d:
-        for iter in range(iter_num):
+
+        iter_count = 0
+        iter_max = 1
+
+        while(1):
+
+            if iter_count >= iter_max:
+                break
 
             total_loss = 0.0
             auginfo = Auginfo(x.shape[2])
@@ -396,37 +402,93 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
             speed_list = []
 
             for data in x:
-                #x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
-                #speed_list.append(speed)
-                #predictions, _, _, _  = model(x_aug.unsqueeze(0).cuda())
-                predictions, _, _, _ = model(data.unsqueeze(0))
+                if AUG:
+                    x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
+                    speed_list.append(speed)
+                    predictions, _, _, _  = model(x_aug.unsqueeze(0).cuda())
+                else:
+                    speed_list.append(1.0)
+                    predictions, _, _, _ = model(data.unsqueeze(0))
+
+                predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)  # normalize
 
                 predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
                 prediction_list.append(predictions_smooth)
-                speed_list.append(1.0)
-
+            fw_cnt += 1
 
             prediction_list = torch.stack(prediction_list)
             predictions_batch = prediction_list.view(-1, 128)
             speed = torch.tensor(speed_list)
 
             freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
-                                                      normalize=False, bandpass=False)
+                                                      normalize=True, bandpass=False)
 
             bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
             variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
             sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
             print("bandwidth_loss:", bandwidth_loss, "sparsity_loss:", sparsity_loss, "variance_loss:", variance_loss)
 
-            sinc_total_loss = bandwidth_loss + variance_loss + sparsity_loss
+            sinc_total_loss = bandwidth_loss  + sparsity_loss # + variance_loss
             total_loss += sinc_total_loss
+
+            if ADAPTIVE_OPT and iter_count==0 and total_loss > 0.6:
+                iter_max = 10
 
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
+            y_ = torch_detrend(torch.cumsum(y, axis=0), torch.tensor(100.0))
 
-            #input_error = get_loss_3d(x, model)
-            #print(origin_input_error,"->",input_error)
+            # bandpass filter between [0.75, 2.5] Hz
+            # equals [45, 150] beats per min
+            [b, a] = butter(1, [0.75 / fps * 2, 2.5 / fps * 2], btype='bandpass')
+            y_ = scipy.signal.filtfilt(b, a, np.double(y_.detach().cpu().numpy()))
+
+            y_tensor = torch.from_numpy(y_.copy())
+            freqs, y_psd = torch_power_spectral_density(y_tensor, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                     normalize=True, bandpass=False)
+
+            freq_error = (torch.mean(abs(freqs[y_psd.argmax(dim=1)] - freqs[psd.argmax(dim=1)]))).detach().cpu().numpy()
+            wandb.log( {'bandwidth_loss': bandwidth_loss, "sparsity_loss:": sparsity_loss,
+                        "variance_loss:": variance_loss, "freq_error":freq_error},step=iter)
+
+            iter_count+=1
+
+            if iter_count>=1:
+                fig = plt.figure()
+
+                error = abs(freqs[y_psd[0].argmax(dim=0)] - freqs[psd[0].argmax(dim=0)]).detach().cpu().numpy()
+                title = f"iter_count:{iter_count},error:{round(float(error),2)}," \
+                        f"b_l:{round(float(bandwidth_loss.detach().cpu().numpy()),2)}," \
+                        f"s_l:{round(float(sparsity_loss.detach().cpu().numpy()),2)}," \
+                        f"v_l:{round(float(variance_loss.detach().cpu().numpy()),2)}"
+                plt.title(title)
+                plt.plot(psd[0].detach().cpu().numpy(),color='blue')
+                plt.plot(y_psd[0].detach().cpu().numpy(),color='red')
+                plt.axvline(x=psd[0].detach().cpu().numpy().argmax(), color='blue', linestyle='--')
+                plt.axvline(x=y_psd[0].detach().cpu().numpy().argmax(), color='red', linestyle='--')
+
+                plt.axvline(x=120, color='gray', linestyle='-')
+                plt.axvline(x=540, color='gray', linestyle='-')
+
+                plt.savefig("output_psd.png")
+                plt.close()
+                plt.clf()
+                gc.collect()
+                wandb.log({
+                    "output_psd": [
+                        wandb.Image('output_psd.png')
+                    ]
+                },step=iter)
+
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        wandb.log({f'weights/{name}': wandb.Histogram(param.clone().detach().cpu().numpy())},step=iter)
+
+            bw_cnt += 1
+
+
+
 
 
     if SINC_ORIGIN or SINC :
@@ -453,7 +515,7 @@ def forward_and_adapt(x, y, model, optimizer, model_name):
         last_prediction = predictions_
     """
 
-    return predictions_
+    return predictions_,(fw_cnt,bw_cnt)
 
 
 def collect_params(model):
@@ -498,9 +560,9 @@ def configure_model(model):
     # configure norm for tent updates: enable grad + force batch statisics
     for name, m in model.named_modules():
 
-        # print (name)
+        print (name)
         """
-        if name.find('motion_conv1') != -1:
+        if name.find('ConvBlock1') != -1:
             target_layer = get_named_submodule(model, name)
             target_layer.requires_grad_(True)
         """

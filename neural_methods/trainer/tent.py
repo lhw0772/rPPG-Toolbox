@@ -21,8 +21,8 @@ from neural_methods.utils.utils import set_named_submodule, get_named_submodule
 import time
 
 import wandb
-wandb.init(project='tent')
-wandb.run.name = 'tent-lre2-mmpd-novar'
+
+WEIGHT_UPDATE = True
 
 EPSILON = 1e-10
 BP_LOW=2/3
@@ -123,18 +123,28 @@ class Tent(nn.Module):
         self.tta_fw_cnt = 0
         self.tta_bw_cnt = 0
         self.iter =0
+        self.freq_error_list = []
+        self.total_loss_list =[]
 
     def forward(self, x , y):
         if self.episodic:
             self.reset()
 
         for _ in range(self.steps):
-            outputs ,(fw_cnt,bw_cnt) = forward_and_adapt(x, y , self.model, self.optimizer, self.model_name, self.iter)
+            outputs ,(fw_cnt,bw_cnt), (freq_error,total_loss) = forward_and_adapt\
+                (x, y , self.model, self.optimizer, self.model_name, self.iter)
 
             self.tta_fw_cnt += fw_cnt
             self.tta_bw_cnt += bw_cnt
             self.iter+=1
 
+            """
+            if(self.iter %100 == 0):
+                self.reset()
+            """
+
+            self.freq_error_list.append(freq_error)
+            self.total_loss_list.append(total_loss)
 
         return outputs
 
@@ -164,6 +174,25 @@ def get_smooth_result(input):
 def mc_dropout_uncertainty_loss(outputs, num_mc_samples):
     variance = torch.var(outputs, dim=0, unbiased=False)  # Calculate variance across batches
     return torch.mean(variance)
+
+
+def get_filtered_freqs_psd(y):
+    fps= 30
+    low_hz = float(0.66666667)
+    high_hz = float(3.0)
+
+    y_ = torch_detrend(torch.cumsum(y, axis=0), torch.tensor(100.0))
+
+    # bandpass filter between [0.75, 2.5] Hz
+    # equals [45, 150] beats per min
+    [b, a] = butter(1, [0.75 / fps * 2, 2.5 / fps * 2], btype='bandpass')
+    y_ = scipy.signal.filtfilt(b, a, np.double(y_.detach().cpu().numpy()))
+
+    y_tensor = torch.from_numpy(y_.copy())
+    freqs, y_psd = torch_power_spectral_density(y_tensor, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                normalize=True, bandpass=False)
+
+    return freqs,y_psd
 
 def get_loss(x,model):
 
@@ -235,7 +264,7 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
     SINC_3d = 0
 
     AUG = 0
-    ADAPTIVE_OPT = 1
+    ADAPTIVE_OPT = 0
 
 
     if model_name == 'EfficientPhys':
@@ -428,15 +457,36 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
             sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
             print("bandwidth_loss:", bandwidth_loss, "sparsity_loss:", sparsity_loss, "variance_loss:", variance_loss)
 
-            sinc_total_loss = bandwidth_loss  + sparsity_loss # + variance_loss
-            total_loss += sinc_total_loss
+            sinc_total_loss = bandwidth_loss  + sparsity_loss  + variance_loss
 
-            if ADAPTIVE_OPT and iter_count==0 and total_loss > 0.6:
-                iter_max = 10
 
-            optimizer.zero_grad()
-            total_loss.backward()
-            optimizer.step()
+            if WEIGHT_UPDATE:
+                total_loss += sinc_total_loss
+            else:
+                sinc_total_loss = sinc_total_loss.detach()
+
+
+            #if ADAPTIVE_OPT and iter_count==0 and total_loss > 0.6:
+            #    iter_max = 10
+
+
+            if ADAPTIVE_OPT and iter_count==0:
+                if total_loss >= 0.9:
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = 1e-2
+                else:
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = 1e-3
+
+
+            if WEIGHT_UPDATE:
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
+            else:
+                optimizer.zero_grad()
+
+
             y_ = torch_detrend(torch.cumsum(y, axis=0), torch.tensor(100.0))
 
             # bandpass filter between [0.75, 2.5] Hz
@@ -449,14 +499,14 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
                                                      normalize=True, bandpass=False)
 
             freq_error = (torch.mean(abs(freqs[y_psd.argmax(dim=1)] - freqs[psd.argmax(dim=1)]))).detach().cpu().numpy()
-            wandb.log( {'bandwidth_loss': bandwidth_loss, "sparsity_loss:": sparsity_loss,
+            wandb.log( {'sinc_total_loss':sinc_total_loss, 'bandwidth_loss': bandwidth_loss, "sparsity_loss:": sparsity_loss,
                         "variance_loss:": variance_loss, "freq_error":freq_error},step=iter)
 
             iter_count+=1
 
             if iter_count>=1:
+                """
                 fig = plt.figure()
-
                 error = abs(freqs[y_psd[0].argmax(dim=0)] - freqs[psd[0].argmax(dim=0)]).detach().cpu().numpy()
                 title = f"iter_count:{iter_count},error:{round(float(error),2)}," \
                         f"b_l:{round(float(bandwidth_loss.detach().cpu().numpy()),2)}," \
@@ -471,6 +521,7 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
                 plt.axvline(x=120, color='gray', linestyle='-')
                 plt.axvline(x=540, color='gray', linestyle='-')
 
+                #plt.show()
                 plt.savefig("output_psd.png")
                 plt.close()
                 plt.clf()
@@ -480,11 +531,11 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
                         wandb.Image('output_psd.png')
                     ]
                 },step=iter)
-
+                
                 for name, param in model.named_parameters():
                     if param.requires_grad:
                         wandb.log({f'weights/{name}': wandb.Histogram(param.clone().detach().cpu().numpy())},step=iter)
-
+                """
             bw_cnt += 1
 
 
@@ -514,8 +565,8 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
     else:
         last_prediction = predictions_
     """
-
-    return predictions_,(fw_cnt,bw_cnt)
+    #predictions_ = model(x)
+    return predictions_,(fw_cnt,bw_cnt), (freq_error, sinc_total_loss.detach().cpu().numpy())
 
 
 def collect_params(model):
@@ -554,7 +605,11 @@ def load_model_and_optimizer(model, optimizer, model_state, optimizer_state):
 def configure_model(model):
     """Configure model for use with tent."""
     # train mode, because tent optimizes the model to minimize entropy
-    model.train()
+
+    if WEIGHT_UPDATE:
+        model.train()
+    else:
+        model.eval()
     # disable grad, to (re-)enable only what tent updates
     model.requires_grad_(False)
     # configure norm for tent updates: enable grad + force batch statisics

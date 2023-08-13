@@ -11,6 +11,12 @@ from dataset import data_loader
 from neural_methods import trainer
 from unsupervised_methods.unsupervised_predictor import unsupervised_predict
 from torch.utils.data import DataLoader
+import wandb
+import os
+
+os.environ["WANDB_MODE"] = "dryrun"
+os.environ["WANDB_API_KEY"] = "3f7d4d30329213b73b49c62b8105a040cf975822"
+NOTE = 'test'
 
 RANDOM_SEED = 100
 torch.manual_seed(RANDOM_SEED)
@@ -139,6 +145,26 @@ if __name__ == "__main__":
     config = get_config(args)
     print('Configuration:')
     print(config, end='\n\n')
+
+    DATASET_INFO = args.config_file.split('/')[-1].split('.yaml')[0]
+
+    light_str = ''.join(str(i) for i in config.TEST.DATA.INFO.LIGHT)
+    motion_str = ''.join(str(i) for i in config.TEST.DATA.INFO.MOTION)
+    exercise_str = ''.join(str(i) for i in config.TEST.DATA.INFO.EXERCISE)
+    skin_color_str = ''.join(str(i) for i in config.TEST.DATA.INFO.SKIN_COLOR)
+
+
+    DATASET_VER= light_str + motion_str + exercise_str + skin_color_str
+
+    method = config.INFERENCE.TTA
+    if method == '':
+        method = 'onlytest'
+    log_title = f'{method}-{DATASET_INFO}-{DATASET_VER}-{NOTE}'
+
+    wandb.init(project='tent-rppg-test')
+    wandb.run.name = log_title
+
+
 
     data_loader_dict = dict() # dictionary of data loaders 
     if config.TOOLBOX_MODE == "train_and_test":

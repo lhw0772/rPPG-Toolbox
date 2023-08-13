@@ -115,8 +115,10 @@ class CSTU:
     def get_memory(self):
         tmp_data = []
         tmp_age = []
-
-        for class_list in self.data:
+        print('memory status')
+        for idx,class_list in enumerate(self.data):
+            if class_list:
+                print(idx, class_list[0].age)
             for item in class_list:
                 tmp_data.append(item.data)
                 tmp_age.append(item.age)

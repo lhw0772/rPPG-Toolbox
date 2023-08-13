@@ -14,6 +14,12 @@ import neural_methods.loss.sinc_loss as sinc_loss
 import neural_methods.trainer.tent as tent
 import matplotlib.pyplot as plt
 
+from scipy.signal import butter
+import scipy
+import numpy as np
+
+import wandb
+import os
 
 def batched_normed_psd(x, y):
   """
@@ -37,7 +43,7 @@ def label_distance(labels_1, labels_2 , label_temperature=0.1):
 class RoTTA(BaseAdapter):
     def __init__(self, cfg, model, optimizer):
         super(RoTTA, self).__init__(cfg, model, optimizer)
-        self.mem = memory.CSTU(capacity=self.cfg.ADAPTER.RoTTA.MEMORY_SIZE, num_class=8, lambda_t=cfg.ADAPTER.RoTTA.LAMBDA_T, lambda_u=cfg.ADAPTER.RoTTA.LAMBDA_U)
+        self.mem = memory.CSTU(capacity=self.cfg.ADAPTER.RoTTA.MEMORY_SIZE, num_class=5, lambda_t=cfg.ADAPTER.RoTTA.LAMBDA_T, lambda_u=cfg.ADAPTER.RoTTA.LAMBDA_U)
         self.model_ema = self.build_ema(self.model)
         #self.transform = get_tta_transforms(cfg)
 
@@ -64,19 +70,24 @@ class RoTTA(BaseAdapter):
                 low_hz = float(0.66666667)
                 high_hz = float(3.0)
 
+                [b, a] = butter(1, [0.75 / fps * 2, 2.5 / fps * 2], btype='bandpass')
+                ema_smooth = scipy.signal.filtfilt(b, a, np.double(ema_smooth.detach().cpu().numpy()))
+                ema_smooth = torch.from_numpy(ema_smooth.copy()).cuda()
+
                 freqs, psd = tent.torch_power_spectral_density(ema_smooth, fps=fps, low_hz=low_hz, high_hz=high_hz,
                                                           normalize=False, bandpass=False)
 
                 speed= torch.tensor([torch.tensor(1.0)])
+
                 pseudo_label = torch.round(freqs[psd.argmax(axis=1)]*3)-2
 
                 entropy = []
                 for i in range(pseudo_label.shape[0]):
                     bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd[i].unsqueeze(0), speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
-                    variance_loss = sinc_loss.EMD_SSL(freqs, psd[i].unsqueeze(0), speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+                    #variance_loss = sinc_loss.EMD_SSL(freqs, psd[i].unsqueeze(0), speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
                     sparsity_loss = sinc_loss.SNR_SSL(freqs, psd[i].unsqueeze(0), speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
 
-                    entropy_ = bandwidth_loss + variance_loss + sparsity_loss
+                    entropy_ = bandwidth_loss + sparsity_loss
                     entropy.append(entropy_)
 
                 entropy = torch.stack(entropy)
@@ -87,7 +98,7 @@ class RoTTA(BaseAdapter):
             for i, data in enumerate(batch_data):
                 p_l = int(pseudo_label[i].item())
 
-                if p_l >= 8 or p_l < 0:
+                if p_l >= 5 or p_l < 0:
                     continue
 
                 uncertainty = entropy[i].item()
@@ -169,8 +180,8 @@ class RoTTA(BaseAdapter):
             l_sup = None
 
             initial_params = {name: param.clone().detach() for name, param in model.named_parameters()}
-            #kld_loss = torch.nn.KLDivLoss(reduction='none')
-            kld_loss = torch.nn.KLDivLoss(reduction='batchmean')
+            kld_loss = torch.nn.KLDivLoss(reduction='none')
+            #kld_loss = torch.nn.KLDivLoss(reduction='batchmean')
 
             if len(sup_data) > 0:
                 sup_data = torch.stack(sup_data)
@@ -189,7 +200,6 @@ class RoTTA(BaseAdapter):
                         self.speed_fast = 1.0  # self.speed_fast = 1.4
 
                 neg_auginfo = Auginfo(sup_data.shape[2])
-
                 pos_auginfo = Auginfo(sup_data.shape[2])
                 pos_auginfo.aug_speed = 0
 
@@ -253,7 +263,6 @@ class RoTTA(BaseAdapter):
                 simper_loss = criterion (y_pred,y_labels.cuda())
                 """
 
-
                 """
                 plt.plot(ema_psd[0].detach().cpu().numpy())
                 plt.plot(neg_stu_psd[0].detach().cpu().numpy())
@@ -283,7 +292,8 @@ class RoTTA(BaseAdapter):
                 sinc_loss_total = pos_sinc_loss_total  + origin_sinc_loss_total
                 #l_consistency = sum(abs(stu_sup_out - ema_sup_out) * instance_weight[idx])
 
-                l_kld_consistency = kld_loss((pos_stu_psd+1e-10).log(), ema_psd)
+                l_kld_consistency = (kld_loss((pos_stu_psd + 1e-10).log(), ema_psd)[..., 0].T * instance_weight).sum() / pos_stu_psd.shape[0]
+                #l_kld_consistency = kld_loss((pos_stu_psd+1e-10).log(), ema_psd)
                 #l_kld_consistency = (kld_loss((pos_stu_psd + 1e-10).log(), ema_psd) * instance_weight).sum() / pos_stu_psd.size(0)
 
                 #l_kld_consistency = (softmax_entropy(pos_stu_psd, ema_psd)*instance_weight).mean()
@@ -291,6 +301,14 @@ class RoTTA(BaseAdapter):
                 print("origin_sinc_loss_total:", origin_sinc_loss_total)
                 print ("pos_sinc_loss_total:", pos_sinc_loss_total)
                 print ("l_kld_consistency:", l_kld_consistency)
+
+                wandb.log({'origin_sinc_loss_total': origin_sinc_loss_total, "pos_sinc_loss_total:": pos_sinc_loss_total,
+                           "l_kld_consistency:": l_kld_consistency})
+
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        wandb.log({f's_weights/{name}': wandb.Histogram(param.clone().detach().cpu().numpy())})
+
                 #print("simper_loss:", simper_loss)
 
         else:

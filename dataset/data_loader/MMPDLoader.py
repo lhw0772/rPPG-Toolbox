@@ -178,7 +178,25 @@ class MMPDLoader(BaseLoader):
                 inputs.append(each_input)
         if not inputs:
             raise ValueError(self.dataset_name + ' dataset loading data error!')
-        inputs = sorted(inputs)  # sort input file name list
+
+        def extract_alphanumeric(s):
+            # Extracts numeric part from a string
+            return re.findall(r'\d+', s)
+
+        def custom_sort_strings(arr):
+            def alphanumeric_key(s):
+                # Extract numeric parts and non-numeric parts
+                numeric_parts = extract_alphanumeric(s)
+                non_numeric_part = re.split(r'\d+', s)[0]
+
+                # Creates a tuple of extracted numeric values and the non-numeric part for sorting
+                return (non_numeric_part, [int(x) if x.isdigit() else x for x in numeric_parts])
+
+            sorted_arr = sorted(arr, key=alphanumeric_key)
+            return sorted_arr
+
+        #inputs= sorted(inputs)
+        inputs = custom_sort_strings(inputs)  # sort input file name list
         labels = [input_file.replace("input", "label") for input_file in inputs]
         self.inputs = inputs
         self.labels = labels

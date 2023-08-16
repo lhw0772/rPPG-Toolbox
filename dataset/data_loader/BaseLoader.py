@@ -241,6 +241,8 @@ class BaseLoader(Dataset):
                 data.append(BaseLoader.diff_normalize_data(f_c))
             elif data_type == "Standardized":
                 data.append(BaseLoader.standardized_data(f_c))
+            elif data_type =='Maxnet':
+                data.append((f_c-127.5)/128)
             else:
                 raise ValueError("Unsupported data type!")
         data = np.concatenate(data, axis=-1)  # concatenate all channels

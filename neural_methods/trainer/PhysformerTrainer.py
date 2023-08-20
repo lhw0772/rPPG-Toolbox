@@ -31,12 +31,12 @@ from tqdm import tqdm
 import neural_methods.trainer.tent as tent
 from neural_methods.adapter import build_adapter
 
-from model.Physformer import ViT_ST_ST_Compact3_TDC_gra_sharp
+from neural_methods.model.Physformer import ViT_ST_ST_Compact3_TDC_gra_sharp
 import scipy
 import scipy.io
 from scipy.signal import butter
 from evaluation.post_process import _calculate_fft_hr
-from loss.TorchLossComputer import TorchLossComputer
+from neural_methods.loss.TorchLossComputer import TorchLossComputer
 import math
 from evaluation.post_process import _detrend
 

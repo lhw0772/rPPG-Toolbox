@@ -296,6 +296,8 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
         SINC_ORIGIN = 1
     elif model_name == 'Physnet':
         SINC_3d = 1
+    elif model_name == 'Physformer':
+        SINC_3d_former = 1
 
 
     fps = float(30)
@@ -307,7 +309,11 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
     # Save the initial parameters along with their names
     #initial_params = {name: param.clone().detach() for name, param in model.named_parameters()}
 
-    predictions_ = model(x)
+    if model_name =='Physformer':
+        gra_sharp = 2.0
+        predictions_ = model(x,gra_sharp)
+    else:
+        predictions_ = model(x)
 
 
     if SINC_3d :
@@ -588,7 +594,89 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
                 """
             bw_cnt += 1
 
+    if SINC_3d_former:
 
+        total_loss = 0.0
+        auginfo = Auginfo(x.shape[2])
+
+        prediction_list = []
+        speed_list = []
+        
+        gra_sharp = 2.0
+        
+        for data in x:
+            if AUG:
+                x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
+                speed_list.append(speed)
+                predictions, _, _, _  = model(x_aug.unsqueeze(0).cuda(),gra_sharp)
+            else:
+                speed_list.append(1.0)
+                predictions, _, _, _ = model(data.unsqueeze(0),gra_sharp)
+
+            predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)  # normalize
+
+            predictions_smooth = torch_detrend(predictions.T, torch.tensor(100.0))
+            prediction_list.append(predictions_smooth)
+        fw_cnt += 1
+
+        prediction_list = torch.stack(prediction_list)
+        predictions_batch = prediction_list.view(-1, 160)
+        speed = torch.tensor(speed_list)
+
+        freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                  normalize=True, bandpass=False)
+
+        bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+        variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+        sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+
+        sinc_total_loss = bandwidth_loss *b_scale + sparsity_loss *s_scale + variance_loss *v_scale
+
+        frequency_const_loss = torch.var(psd,dim=0).sum() * fc_scale
+        if WEIGHT_UPDATE:
+            total_loss += sinc_total_loss
+            total_loss += frequency_const_loss
+        else:
+            sinc_total_loss = sinc_total_loss.detach()
+
+
+        y_ = torch_detrend(y, torch.tensor(100.0))
+
+        # bandpass filter between [0.75, 2.5] Hz
+        # equals [45, 150] beats per min
+        [b, a] = butter(1, [0.75 / fps * 2, 2.5 / fps * 2], btype='bandpass')
+        y_ = scipy.signal.filtfilt(b, a, np.double(y_.detach().cpu().numpy()))
+
+        y_tensor = torch.from_numpy(y_.copy())
+        freqs, y_psd = torch_power_spectral_density(y_tensor, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                 normalize=True, bandpass=False)
+
+        freq_error = (torch.mean(abs(freqs[y_psd.argmax(dim=1)] - freqs[psd.argmax(dim=1)]))).detach().cpu().numpy()
+
+        p_target = scipy.signal.filtfilt(b, a, np.double(predictions_batch.detach().cpu().numpy()))
+
+        if WEIGHT_UPDATE:
+            temporal_smooth_loss = (torch.mean(abs(torch.from_numpy(p_target.copy()).cuda()-predictions_batch))
+                                    * sm_scale)
+            total_loss += temporal_smooth_loss
+
+        wandb.log( {'sinc_total_loss': sinc_total_loss, 'bandwidth_loss': bandwidth_loss,
+                    "sparsity_loss:": sparsity_loss, "variance_loss:": variance_loss,
+                    "freq_error": freq_error, "frequency_const_loss": frequency_const_loss,
+                    "temporal_smooth_loss":temporal_smooth_loss}, step=iter)
+
+        print("bandwidth_loss:", round(bandwidth_loss.item(),2), "sparsity_loss:", round(sparsity_loss.item(),2),
+              "variance_loss:", round(variance_loss.item(),2) ,"frequency_const_loss:", round(frequency_const_loss.item(),2),
+              "temporal_smooth_loss:", round(temporal_smooth_loss.item(),2))
+
+        if WEIGHT_UPDATE:
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+        else:
+            optimizer.zero_grad()
+
+        bw_cnt += 1
 
 
 

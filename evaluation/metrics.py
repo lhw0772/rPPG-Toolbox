@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 import matplotlib.pyplot as plt
 
+import sys
 def read_label(dataset):
     """Read manually corrected labels."""
     df = pd.read_csv("label/{0}_Comparison.csv".format(dataset))
@@ -97,11 +98,20 @@ def calculate_metrics(predictions, labels, config):
         gt_hr_fft_all = np.array(gt_hr_fft_all)
         predict_hr_fft_all = np.array(predict_hr_fft_all)
 
-        plt.plot(gt_hr_fft_all, color='red')
-        plt.plot(predict_hr_fft_all, color='blue')
+        if config.LOG.FILE == False:
+            plt.subplot(2,1,1)
 
-        plt.plot(abs(gt_hr_fft_all-predict_hr_fft_all),color='green')
-        plt.show()
+            plt.plot(gt_hr_fft_all, color='red')
+            plt.plot(predict_hr_fft_all, color='blue')
+            plt.plot(abs(gt_hr_fft_all-predict_hr_fft_all),color='green')
+
+            plt.subplot(2,1,2)
+            plt.scatter(x=predict_hr_fft_all,y=gt_hr_fft_all)
+            plt.plot(np.unique(predict_hr_fft_all), np.poly1d(np.polyfit(predict_hr_fft_all, gt_hr_fft_all, 1))(np.unique(predict_hr_fft_all)), color='red', label='Correlation Line')
+
+            plt.show()
+        else:
+            sys.stdout = open(f'log/{config.TEST.DATA.INFO}_{config.ADAPTER.TENT}.txt', 'w')
 
         SNR_all = np.array(SNR_all)
         num_test_samples = len(predict_hr_fft_all)

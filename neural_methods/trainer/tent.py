@@ -105,7 +105,8 @@ class Tent(nn.Module):
 
     Once tented, a model adapts itself by updating on every forward.
     """
-    def __init__(self, model, optimizer, steps=1, episodic=False, model_name='None' ):
+    def __init__(self, model, optimizer, steps=1, episodic=False, model_name='None', b_scale=1.0 , s_scale=1.0,
+                 v_scale=1.0, sm_scale=0.1 , fc_scale=5.0):
         super().__init__()
         self.model = model
         self.optimizer = optimizer
@@ -126,13 +127,24 @@ class Tent(nn.Module):
         self.freq_error_list = []
         self.total_loss_list =[]
 
+        self.b_scale = b_scale
+        self.s_scale = s_scale
+        self.v_scale = v_scale
+        self.sm_scale = sm_scale
+        self.fc_scale = fc_scale
+
     def forward(self, x , y):
         if self.episodic:
             self.reset()
 
-        for _ in range(self.steps):
+        loss_list = []
+        error_list = []
+        index_list = []
+
+        for index in range(self.steps):
             outputs ,(fw_cnt,bw_cnt), (freq_error,total_loss) = forward_and_adapt\
-                (x, y , self.model, self.optimizer, self.model_name, self.iter)
+                (x, y , self.model, self.optimizer, self.model_name, self.iter,self.b_scale,self.s_scale,self.v_scale,
+                 self.sm_scale,self.fc_scale)
 
             self.tta_fw_cnt += fw_cnt
             self.tta_bw_cnt += bw_cnt
@@ -142,9 +154,22 @@ class Tent(nn.Module):
             if(self.iter %100 == 0):
                 self.reset()
             """
-
             self.freq_error_list.append(freq_error)
             self.total_loss_list.append(total_loss)
+
+            loss_list.append(total_loss)
+            error_list.append(freq_error)
+            index_list.append(index)
+
+        index_list = np.array(index_list)
+        color_map = plt.get_cmap('tab10')
+        colors = color_map(index_list)
+
+        """
+        plt.scatter(x=np.array(loss_list), y=np.array(error_list),color=colors)
+        plt.show()
+        """
+
 
         return outputs
 
@@ -247,7 +272,7 @@ def get_loss_3d(x,model):
 
 
 @torch.enable_grad()  # ensure grads in possible no grad context for testing
-def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
+def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale,v_scale,sm_scale,fc_scale):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
@@ -263,7 +288,7 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
     SINC_ORIGIN = 0
     SINC_3d = 0
 
-    AUG = 0
+    AUG = 1
     ADAPTIVE_OPT = 0
 
 
@@ -455,13 +480,13 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
             bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
             variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
             sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
-            print("bandwidth_loss:", bandwidth_loss, "sparsity_loss:", sparsity_loss, "variance_loss:", variance_loss)
 
-            sinc_total_loss = bandwidth_loss  + sparsity_loss  + variance_loss
+            sinc_total_loss = bandwidth_loss *b_scale + sparsity_loss *s_scale + variance_loss *v_scale
 
-
+            frequency_const_loss = torch.var(psd,dim=0).sum() * fc_scale
             if WEIGHT_UPDATE:
                 total_loss += sinc_total_loss
+                total_loss += frequency_const_loss
             else:
                 sinc_total_loss = sinc_total_loss.detach()
 
@@ -479,14 +504,6 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
                         param_group['lr'] = 1e-3
 
 
-            if WEIGHT_UPDATE:
-                optimizer.zero_grad()
-                total_loss.backward()
-                optimizer.step()
-            else:
-                optimizer.zero_grad()
-
-
             y_ = torch_detrend(torch.cumsum(y, axis=0), torch.tensor(100.0))
 
             # bandpass filter between [0.75, 2.5] Hz
@@ -499,10 +516,32 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
                                                      normalize=True, bandpass=False)
 
             freq_error = (torch.mean(abs(freqs[y_psd.argmax(dim=1)] - freqs[psd.argmax(dim=1)]))).detach().cpu().numpy()
-            wandb.log( {'sinc_total_loss':sinc_total_loss, 'bandwidth_loss': bandwidth_loss, "sparsity_loss:": sparsity_loss,
-                        "variance_loss:": variance_loss, "freq_error":freq_error},step=iter)
 
             iter_count+=1
+
+            p_target = scipy.signal.filtfilt(b, a, np.double(predictions_batch.detach().cpu().numpy()))
+
+            if WEIGHT_UPDATE:
+                temporal_smooth_loss = (torch.mean(abs(torch.from_numpy(p_target.copy()).cuda()-predictions_batch))
+                                        * sm_scale)
+                total_loss += temporal_smooth_loss
+
+            wandb.log( {'sinc_total_loss': sinc_total_loss, 'bandwidth_loss': bandwidth_loss,
+                        "sparsity_loss:": sparsity_loss, "variance_loss:": variance_loss,
+                        "freq_error": freq_error, "frequency_const_loss": frequency_const_loss,
+                        "temporal_smooth_loss":temporal_smooth_loss}, step=iter)
+
+            print("bandwidth_loss:", round(bandwidth_loss.item(),2), "sparsity_loss:", round(sparsity_loss.item(),2),
+                  "variance_loss:", round(variance_loss.item(),2) ,"frequency_const_loss:", round(frequency_const_loss.item(),2),
+                  "temporal_smooth_loss:", round(temporal_smooth_loss.item(),2))
+
+            if WEIGHT_UPDATE:
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
+            else:
+                optimizer.zero_grad()
+
 
             if iter_count>=1:
                 """
@@ -521,7 +560,18 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
                 plt.axvline(x=120, color='gray', linestyle='-')
                 plt.axvline(x=540, color='gray', linestyle='-')
 
-                #plt.show()
+                plt.show()
+                plt.close()
+                plt.clf()
+                
+                plt.plot(psd[0].detach().cpu().numpy())
+                plt.plot(psd[1].detach().cpu().numpy())
+                plt.plot(psd[2].detach().cpu().numpy())
+                plt.plot(psd[3].detach().cpu().numpy())
+                plt.show()
+            
+                print (torch.var(psd))
+                
                 plt.savefig("output_psd.png")
                 plt.close()
                 plt.clf()
@@ -565,8 +615,8 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter):
     else:
         last_prediction = predictions_
     """
-    #predictions_ = model(x)
-    return predictions_,(fw_cnt,bw_cnt), (freq_error, sinc_total_loss.detach().cpu().numpy())
+
+    return predictions_,(fw_cnt,bw_cnt), (freq_error, total_loss.detach().cpu().numpy())
 
 
 def collect_params(model):

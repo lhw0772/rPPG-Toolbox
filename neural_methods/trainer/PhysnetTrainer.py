@@ -246,7 +246,12 @@ class PhysnetTrainer(BaseTrainer):
         tent_model = tent.Tent(model, optimizer,
                                steps=self.config.OPTIM.STEPS,
                                episodic=self.config.MODEL.EPISODIC,
-                               model_name=self.config.MODEL.NAME)
+                               model_name=self.config.MODEL.NAME,
+                               b_scale=self.config.ADAPTER.TENT.B_SCALE,
+                               s_scale=self.config.ADAPTER.TENT.S_SCALE,
+                               v_scale=self.config.ADAPTER.TENT.V_SCALE,
+                               sm_scale=self.config.ADAPTER.TENT.SM_SCALE,
+                               fc_scale=self.config.ADAPTER.TENT.FC_SCALE)
         # logger.info(f"model for adaptation: %s", model)
         # logger.info(f"params for adaptation: %s", param_names)
         # logger.info(f"optimizer for adaptation: %s", optimizer)

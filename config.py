@@ -87,7 +87,7 @@ _C.TRAIN.DATA.PREPROCESS.BIGSMALL.RESIZE.BIG_H = 144
 _C.TRAIN.DATA.PREPROCESS.BIGSMALL.RESIZE.SMALL_W = 9
 _C.TRAIN.DATA.PREPROCESS.BIGSMALL.RESIZE.SMALL_H = 9
 
-_C.TRAIN.SSL = 1
+_C.TRAIN.SSL = 0
 # -----------------------------------------------------------------------------
 # Valid settings
 # -----------------------------------------------------------------------------\
@@ -327,6 +327,7 @@ _C.NUM_OF_GPU_TRAIN = 1
 # -----------------------------------------------------------------------------
 _C.LOG = CN()
 _C.LOG.PATH = "runs/exp"
+_C.LOG.FILE = True
 
 # -----------------------------------------------------------------------------
 # tta optimizer settings
@@ -337,7 +338,7 @@ _C.OPTIM = CN()
 # Number of updates per batch
 _C.OPTIM.STEPS = 1
 # Learning rate
-_C.OPTIM.LR = 1e-3
+_C.OPTIM.LR = 1e-2
 # Choices: Adam, SGD
 _C.OPTIM.METHOD = 'Adam'
 # Beta
@@ -366,6 +367,13 @@ _C.ADAPTER.RoTTA.NU = 0.1 # 0.001
 _C.ADAPTER.RoTTA.ALPHA = 0.05
 _C.ADAPTER.RoTTA.LAMBDA_T = 1.0
 _C.ADAPTER.RoTTA.LAMBDA_U = 1.0
+
+_C.ADAPTER.TENT = CN()
+_C.ADAPTER.TENT.B_SCALE = 1.0
+_C.ADAPTER.TENT.S_SCALE = 2.0
+_C.ADAPTER.TENT.V_SCALE = 3.0
+_C.ADAPTER.TENT.SM_SCALE = 0.1
+_C.ADAPTER.TENT.FC_SCALE = 1.0
 
 
 def _update_config_from_file(config, cfg_file):

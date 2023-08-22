@@ -99,16 +99,30 @@ def calculate_metrics(predictions, labels, config):
         predict_hr_fft_all = np.array(predict_hr_fft_all)
 
         if config.LOG.FILE == False:
-            plt.subplot(2,1,1)
-
+            # Your existing data and plotting code
+            plt.subplot(2, 1, 1)
             plt.plot(gt_hr_fft_all, color='red')
             plt.plot(predict_hr_fft_all, color='blue')
-            plt.plot(abs(gt_hr_fft_all-predict_hr_fft_all),color='green')
+            plt.plot(abs(gt_hr_fft_all - predict_hr_fft_all), color='green')
 
-            plt.subplot(2,1,2)
-            plt.scatter(x=predict_hr_fft_all,y=gt_hr_fft_all)
-            plt.plot(np.unique(predict_hr_fft_all), np.poly1d(np.polyfit(predict_hr_fft_all, gt_hr_fft_all, 1))(np.unique(predict_hr_fft_all)), color='red', label='Correlation Line')
+            plt.subplot(2, 1, 2)
+            plt.scatter(x=predict_hr_fft_all, y=gt_hr_fft_all)
 
+            # Original correlation line
+            fit = np.polyfit(predict_hr_fft_all, gt_hr_fft_all, 1)
+            fit_fn = np.poly1d(fit)
+            plt.plot(np.unique(predict_hr_fft_all), fit_fn(np.unique(predict_hr_fft_all)), color='red',
+                     label='Correlation Line')
+
+            # Upper and lower boundaries
+            upper_boundary = fit_fn(np.unique(predict_hr_fft_all)) + 5
+            lower_boundary = fit_fn(np.unique(predict_hr_fft_all)) - 5
+
+            # Plotting the boundaries
+            plt.plot(np.unique(predict_hr_fft_all), upper_boundary, '--', color='red', label='+5 bpm')
+            plt.plot(np.unique(predict_hr_fft_all), lower_boundary, '--', color='red', label='-5 bpm')
+
+            #plt.legend()
             plt.show()
         else:
             sys.stdout = open(f'log/{config.TEST.DATA.INFO}_{config.ADAPTER.TENT}.txt', 'w')

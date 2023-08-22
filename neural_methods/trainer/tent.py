@@ -21,6 +21,7 @@ from neural_methods.utils.utils import set_named_submodule, get_named_submodule
 import time
 
 import wandb
+import gc
 
 WEIGHT_UPDATE = True
 
@@ -289,13 +290,15 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
     SINC_3d = 0
 
     AUG = 1
-    ADAPTIVE_OPT = 0
+    SINC_3d_former = 0
+    AUG_CONST = 0
 
 
     if model_name == 'EfficientPhys':
         SINC_ORIGIN = 1
     elif model_name == 'Physnet':
         SINC_3d = 1
+        AUG_CONST  = 1
     elif model_name == 'Physformer':
         SINC_3d_former = 1
 
@@ -447,91 +450,97 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
 
     if SINC_3d:
 
-        iter_count = 0
-        iter_max = 1
+        total_loss = 0.0
+        auginfo = Auginfo(x.shape[2])
 
-        while(1):
+        prediction_list = []
+        speed_list = []
 
-            if iter_count >= iter_max:
-                break
+        for data in x:
+            if AUG:
+                x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
+                speed_list.append(speed)
+                predictions, _, _, _  = model(x_aug.unsqueeze(0).cuda())
+            else:
+                speed_list.append(1.0)
+                predictions, _, _, _ = model(data.unsqueeze(0))
 
-            total_loss = 0.0
-            auginfo = Auginfo(x.shape[2])
+            predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)  # normalize
 
-            prediction_list = []
-            speed_list = []
+            predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
+            prediction_list.append(predictions_smooth)
+        fw_cnt += 1
+
+        prediction_list = torch.stack(prediction_list)
+        predictions_batch = prediction_list.view(-1, 128)
+        speed = torch.tensor(speed_list)
+
+        freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                  normalize=True, bandpass=False)
+
+        bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+        variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+        sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
+
+        sinc_total_loss = bandwidth_loss *b_scale + sparsity_loss *s_scale + variance_loss *v_scale
+
+        frequency_const_loss = torch.var(psd,dim=0).sum() * fc_scale
+        if WEIGHT_UPDATE:
+            total_loss += sinc_total_loss
+            total_loss += frequency_const_loss
+        else:
+            sinc_total_loss = sinc_total_loss.detach()
+
+        y_ = torch_detrend(torch.cumsum(y, axis=0), torch.tensor(100.0))
+
+        # bandpass filter between [0.75, 2.5] Hz
+        # equals [45, 150] beats per min
+        [b, a] = butter(1, [0.75 / fps * 2, 2.5 / fps * 2], btype='bandpass')
+        y_ = scipy.signal.filtfilt(b, a, np.double(y_.detach().cpu().numpy()))
+
+        y_tensor = torch.from_numpy(y_.copy())
+        freqs, y_psd = torch_power_spectral_density(y_tensor, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                 normalize=True, bandpass=False)
+
+        freq_error = (torch.mean(abs(freqs[y_psd.argmax(dim=1)] - freqs[psd.argmax(dim=1)]))).detach().cpu().numpy()
+
+        p_target = scipy.signal.filtfilt(b, a, np.double(predictions_batch.detach().cpu().numpy()))
+
+        if WEIGHT_UPDATE:
+            temporal_smooth_loss = (torch.mean(abs(torch.from_numpy(p_target.copy()).cuda()-predictions_batch))
+                                    * sm_scale)
+            total_loss += temporal_smooth_loss
+
+        if AUG_CONST:
+            augmentation_n = 10
 
             for data in x:
-                if AUG:
+
+                prediction_list = []
+                speed_list = []
+
+                for aug_idx in range(augmentation_n):
                     x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
                     speed_list.append(speed)
-                    predictions, _, _, _  = model(x_aug.unsqueeze(0).cuda())
-                else:
-                    speed_list.append(1.0)
-                    predictions, _, _, _ = model(data.unsqueeze(0))
+                    predictions, _, _, _ = model(x_aug.unsqueeze(0).cuda())
+                    predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
+                    prediction_list.append(predictions_smooth)
 
-                predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)  # normalize
+                prediction_list = torch.stack(prediction_list)
+                freqs, psd = torch_power_spectral_density(prediction_list, fps=fps, low_hz=low_hz, high_hz=high_hz,
+                                                              normalize=True, bandpass=False)
 
-                predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
-                prediction_list.append(predictions_smooth)
-            fw_cnt += 1
+                mean_psd = torch.mean(psd, dim=0)
+                mean_psd = mean_psd.T
 
-            prediction_list = torch.stack(prediction_list)
-            predictions_batch = prediction_list.view(-1, 128)
-            speed = torch.tensor(speed_list)
+                epsilon = 1e-9
+                marginal_entropy_loss = -torch.sum(mean_psd * torch.log(mean_psd + epsilon), dim=1).mean() * 0.1
 
-            freqs, psd = torch_power_spectral_density(predictions_batch, fps=fps, low_hz=low_hz, high_hz=high_hz,
-                                                      normalize=True, bandpass=False)
+                # marginal_entropy_loss = torch.var(psd, dim=0).sum() *20
+                total_loss += marginal_entropy_loss
+                print("marginal_entropy_loss:", round(marginal_entropy_loss.item(), 2))
 
-            bandwidth_loss = sinc_loss.IPR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
-            variance_loss = sinc_loss.EMD_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
-            sparsity_loss = sinc_loss.SNR_SSL(freqs, psd, speed=speed, low_hz=low_hz, high_hz=high_hz, device='cuda:0')
-
-            sinc_total_loss = bandwidth_loss *b_scale + sparsity_loss *s_scale + variance_loss *v_scale
-
-            frequency_const_loss = torch.var(psd,dim=0).sum() * fc_scale
-            if WEIGHT_UPDATE:
-                total_loss += sinc_total_loss
-                total_loss += frequency_const_loss
-            else:
-                sinc_total_loss = sinc_total_loss.detach()
-
-
-            #if ADAPTIVE_OPT and iter_count==0 and total_loss > 0.6:
-            #    iter_max = 10
-
-
-            if ADAPTIVE_OPT and iter_count==0:
-                if total_loss >= 0.9:
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = 1e-2
-                else:
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = 1e-3
-
-
-            y_ = torch_detrend(torch.cumsum(y, axis=0), torch.tensor(100.0))
-
-            # bandpass filter between [0.75, 2.5] Hz
-            # equals [45, 150] beats per min
-            [b, a] = butter(1, [0.75 / fps * 2, 2.5 / fps * 2], btype='bandpass')
-            y_ = scipy.signal.filtfilt(b, a, np.double(y_.detach().cpu().numpy()))
-
-            y_tensor = torch.from_numpy(y_.copy())
-            freqs, y_psd = torch_power_spectral_density(y_tensor, fps=fps, low_hz=low_hz, high_hz=high_hz,
-                                                     normalize=True, bandpass=False)
-
-            freq_error = (torch.mean(abs(freqs[y_psd.argmax(dim=1)] - freqs[psd.argmax(dim=1)]))).detach().cpu().numpy()
-
-            iter_count+=1
-
-            p_target = scipy.signal.filtfilt(b, a, np.double(predictions_batch.detach().cpu().numpy()))
-
-            if WEIGHT_UPDATE:
-                temporal_smooth_loss = (torch.mean(abs(torch.from_numpy(p_target.copy()).cuda()-predictions_batch))
-                                        * sm_scale)
-                total_loss += temporal_smooth_loss
-
+        if WEIGHT_UPDATE:
             wandb.log( {'sinc_total_loss': sinc_total_loss, 'bandwidth_loss': bandwidth_loss,
                         "sparsity_loss:": sparsity_loss, "variance_loss:": variance_loss,
                         "freq_error": freq_error, "frequency_const_loss": frequency_const_loss,
@@ -541,58 +550,14 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
                   "variance_loss:", round(variance_loss.item(),2) ,"frequency_const_loss:", round(frequency_const_loss.item(),2),
                   "temporal_smooth_loss:", round(temporal_smooth_loss.item(),2))
 
-            if WEIGHT_UPDATE:
-                optimizer.zero_grad()
-                total_loss.backward()
-                optimizer.step()
-            else:
-                optimizer.zero_grad()
+        if WEIGHT_UPDATE:
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+        else:
+            optimizer.zero_grad()
 
-
-            if iter_count>=1:
-                """
-                fig = plt.figure()
-                error = abs(freqs[y_psd[0].argmax(dim=0)] - freqs[psd[0].argmax(dim=0)]).detach().cpu().numpy()
-                title = f"iter_count:{iter_count},error:{round(float(error),2)}," \
-                        f"b_l:{round(float(bandwidth_loss.detach().cpu().numpy()),2)}," \
-                        f"s_l:{round(float(sparsity_loss.detach().cpu().numpy()),2)}," \
-                        f"v_l:{round(float(variance_loss.detach().cpu().numpy()),2)}"
-                plt.title(title)
-                plt.plot(psd[0].detach().cpu().numpy(),color='blue')
-                plt.plot(y_psd[0].detach().cpu().numpy(),color='red')
-                plt.axvline(x=psd[0].detach().cpu().numpy().argmax(), color='blue', linestyle='--')
-                plt.axvline(x=y_psd[0].detach().cpu().numpy().argmax(), color='red', linestyle='--')
-
-                plt.axvline(x=120, color='gray', linestyle='-')
-                plt.axvline(x=540, color='gray', linestyle='-')
-
-                plt.show()
-                plt.close()
-                plt.clf()
-                
-                plt.plot(psd[0].detach().cpu().numpy())
-                plt.plot(psd[1].detach().cpu().numpy())
-                plt.plot(psd[2].detach().cpu().numpy())
-                plt.plot(psd[3].detach().cpu().numpy())
-                plt.show()
-            
-                print (torch.var(psd))
-                
-                plt.savefig("output_psd.png")
-                plt.close()
-                plt.clf()
-                gc.collect()
-                wandb.log({
-                    "output_psd": [
-                        wandb.Image('output_psd.png')
-                    ]
-                },step=iter)
-                
-                for name, param in model.named_parameters():
-                    if param.requires_grad:
-                        wandb.log({f'weights/{name}': wandb.Histogram(param.clone().detach().cpu().numpy())},step=iter)
-                """
-            bw_cnt += 1
+        bw_cnt += 1
 
     if SINC_3d_former:
 
@@ -664,7 +629,6 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
                     "sparsity_loss:": sparsity_loss, "variance_loss:": variance_loss,
                     "freq_error": freq_error, "frequency_const_loss": frequency_const_loss,
                     "temporal_smooth_loss":temporal_smooth_loss}, step=iter)
-
         print("bandwidth_loss:", round(bandwidth_loss.item(),2), "sparsity_loss:", round(sparsity_loss.item(),2),
               "variance_loss:", round(variance_loss.item(),2) ,"frequency_const_loss:", round(frequency_const_loss.item(),2),
               "temporal_smooth_loss:", round(temporal_smooth_loss.item(),2))
@@ -704,7 +668,10 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
         last_prediction = predictions_
     """
 
-    return predictions_,(fw_cnt,bw_cnt), (freq_error, total_loss.detach().cpu().numpy())
+    if total_loss :
+        total_loss = total_loss.detach().cpu().numpy()
+
+    return predictions_,(fw_cnt,bw_cnt), (freq_error, total_loss)
 
 
 def collect_params(model):
@@ -754,6 +721,11 @@ def configure_model(model):
     for name, m in model.named_modules():
 
         print (name)
+        """
+        if name.find('Stem') ==-1:
+            continue
+            
+        """
         """
         if name.find('ConvBlock1') != -1:
             target_layer = get_named_submodule(model, name)

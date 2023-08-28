@@ -327,7 +327,7 @@ _C.NUM_OF_GPU_TRAIN = 1
 # -----------------------------------------------------------------------------
 _C.LOG = CN()
 _C.LOG.PATH = "runs/exp"
-_C.LOG.FILE = True
+_C.LOG.FILE = False
 
 # -----------------------------------------------------------------------------
 # tta optimizer settings
@@ -374,7 +374,7 @@ _C.ADAPTER.TENT.S_SCALE = 2.0
 _C.ADAPTER.TENT.V_SCALE = 3.0
 _C.ADAPTER.TENT.SM_SCALE = 0.1
 _C.ADAPTER.TENT.FC_SCALE = 1.0
-
+_C.ADAPTER.TENT.LEVEL = 0
 
 def _update_config_from_file(config, cfg_file):
     config.defrost()

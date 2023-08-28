@@ -69,7 +69,7 @@ def add_args(parser):
 
 def train_and_test(config, data_loader_dict):
     """Trains the model."""
-    if config.MODEL.NAME == "Physnet":
+    if config.MODEL.NAME == "Physnet" or config.MODEL.NAME =='Physnet_def':
         model_trainer = trainer.PhysnetTrainer.PhysnetTrainer(config, data_loader_dict)
     elif config.MODEL.NAME == "Tscan":
         model_trainer = trainer.TscanTrainer.TscanTrainer(config, data_loader_dict)
@@ -93,7 +93,7 @@ def train_and_test(config, data_loader_dict):
 
 def test(config, data_loader_dict):
     """Tests the model."""
-    if config.MODEL.NAME == "Physnet":
+    if config.MODEL.NAME == "Physnet"  or config.MODEL.NAME =='Physnet_def':
         model_trainer = trainer.PhysnetTrainer.PhysnetTrainer(config, data_loader_dict)
     elif config.MODEL.NAME == "Tscan":
         model_trainer = trainer.TscanTrainer.TscanTrainer(config, data_loader_dict)

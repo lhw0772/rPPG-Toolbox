@@ -33,12 +33,16 @@ import torch.optim as optim
 from evaluation.metrics import calculate_metrics
 from neural_methods.loss.PhysNetNegPearsonLoss import Neg_Pearson
 from neural_methods.model.PhysNet import PhysNet_padding_Encoder_Decoder_MAX
+from neural_methods.model.PhysNet_def import PhysNet_padding_Encoder_Decoder_MAX_def
 from neural_methods.trainer.BaseTrainer import BaseTrainer
 from torch.autograd import Variable
 from tqdm import tqdm
 
 import neural_methods.trainer.tent as tent
 from neural_methods.adapter import build_adapter
+
+
+DEBUG = 0
 
 class PhysnetTrainer(BaseTrainer):
 
@@ -56,8 +60,12 @@ class PhysnetTrainer(BaseTrainer):
         self.min_valid_loss = None
         self.best_epoch = 0
 
-        self.model = PhysNet_padding_Encoder_Decoder_MAX(
-            frames=config.MODEL.PHYSNET.FRAME_NUM).to(self.device)  # [3, T, 128,128]
+        if config.MODEL.NAME =='Physnet_def':
+            self.model = PhysNet_padding_Encoder_Decoder_MAX_def(
+                frames=config.MODEL.PHYSNET.FRAME_NUM).to(self.device)
+        else:
+            self.model = PhysNet_padding_Encoder_Decoder_MAX(
+                frames=config.MODEL.PHYSNET.FRAME_NUM).to(self.device)  # [3, T, 128,128]
 
         if config.TOOLBOX_MODE == "train_and_test":
             self.num_train_batches = len(data_loader["train"])
@@ -182,11 +190,48 @@ class PhysnetTrainer(BaseTrainer):
         self.model = self.model.to(self.config.DEVICE)
         self.model.eval()
         with torch.no_grad():
-            for _, test_batch in enumerate(data_loader['test']):
+            for idx, test_batch in enumerate(data_loader['test']):
                 batch_size = test_batch[0].shape[0]
                 data, label = test_batch[0].to(
                     self.config.DEVICE), test_batch[1].to(self.config.DEVICE)
                 pred_ppg_test, _, _, _ = self.model(data)
+                if DEBUG:
+                    ax1 = plt.subplot(2, 1, 1)
+
+                    predictions_np = pred_ppg_test[0].detach().cpu().numpy()
+
+                    predictions_np = (predictions_np - np.mean(predictions_np)) / np.std(predictions_np)
+                    label_np = label[0].detach().cpu().numpy()
+
+                    ax1.plot(predictions_np, 'blue')
+                    ax1.plot(label_np, 'red')
+
+                    ax2 = plt.subplot(2, 1, 2)
+
+                    freqs, psd, hr_p = tent.get_filtered_freqs_psd(predictions_np)
+                    freqs, y_psd, hr_r = tent.get_filtered_freqs_psd(label_np)
+
+                    error = abs(hr_p - hr_r)
+                    # error = abs(freqs[y_psd[0].argmax(dim=0)] - freqs[psd[0].argmax(dim=0)]).detach().cpu().numpy()
+
+                    ax2.plot(psd[0].detach().cpu().numpy(), color='blue')
+                    ax2.plot(y_psd[0].detach().cpu().numpy(), color='red')
+                    ax2.axvline(x=psd[0].detach().cpu().numpy().argmax(), color='blue', linestyle='--')
+                    ax2.axvline(x=y_psd[0].detach().cpu().numpy().argmax(), color='red', linestyle='--')
+
+                    ax2.axvline(x=120, color='gray', linestyle='-')
+                    ax2.axvline(x=540, color='gray', linestyle='-')
+
+                    plt.suptitle('Various Straight Lines', fontsize=20)
+
+                    title = f"iter_count:{idx},error:{round(float(error), 2)},"
+                    plt.suptitle(title, fontsize=20)
+
+                    plt.show()
+                    plt.close()
+                    plt.clf()
+
+
                 for idx in range(batch_size):
                     subj_index = test_batch[2][idx]
                     sort_index = int(test_batch[3][idx])
@@ -240,9 +285,14 @@ class PhysnetTrainer(BaseTrainer):
         collect the parameters for feature modulation by gradient optimization,
         set up the optimizer, and then tent the model.
         """
-        model = tent.configure_model(model)
+        model = tent.configure_model(model,self.config)
         params, param_names = tent.collect_params(model)
         optimizer = self.setup_optimizer(params)
+
+        print (optimizer)
+
+
+
         tent_model = tent.Tent(model, optimizer,
                                steps=self.config.OPTIM.STEPS,
                                episodic=self.config.MODEL.EPISODIC,
@@ -286,33 +336,42 @@ class PhysnetTrainer(BaseTrainer):
                 pred_ppg_test = pred_ppg_test.detach()
 
                 print (test_batch[2],test_batch[3])
-                """
-                freqs, psd = tent.get_filtered_freqs_psd(pred_ppg_test)
-                freqs, y_psd = tent.get_filtered_freqs_psd(label)
 
-                fig = plt.figure()
-                error = abs(freqs[y_psd[0].argmax(dim=0)] - freqs[psd[0].argmax(dim=0)]).detach().cpu().numpy()
-                title = f"iter_count:{idx},error:{round(float(error), 2)},"
-                plt.title(title)
+                if DEBUG:
+                    ax1 = plt.subplot(2, 1, 1)
 
-                plt.plot(psd[0].detach().cpu().numpy(), color='blue')
-                plt.plot(y_psd[0].detach().cpu().numpy(), color='red')
-                plt.axvline(x=psd[0].detach().cpu().numpy().argmax(), color='blue', linestyle='--')
-                plt.axvline(x=y_psd[0].detach().cpu().numpy().argmax(), color='red', linestyle='--')
+                    predictions_np = pred_ppg_test[0].detach().cpu().numpy()
 
-                plt.axvline(x=120, color='gray', linestyle='-')
-                plt.axvline(x=540, color='gray', linestyle='-')
+                    predictions_np = (predictions_np - np.mean(predictions_np)) / np.std(predictions_np)
+                    label_np = label[0].detach().cpu().numpy()
 
-                plt.savefig("output_psd.png")
-                plt.close()
-                plt.clf()
-                gc.collect()
-                wandb.log({
-                    "output_psd": [
-                        wandb.Image('output_psd.png')
-                    ]
-                }, step=idx)
-                """
+                    ax1.plot(predictions_np, 'blue')
+                    ax1.plot(label_np, 'red')
+
+                    ax2 = plt.subplot(2, 1, 2)
+
+                    freqs, psd , hr_p= tent.get_filtered_freqs_psd(predictions_np)
+                    freqs, y_psd , hr_r= tent.get_filtered_freqs_psd(label_np)
+
+                    error = abs(hr_p-hr_r)
+                    #error = abs(freqs[y_psd[0].argmax(dim=0)] - freqs[psd[0].argmax(dim=0)]).detach().cpu().numpy()
+
+                    ax2.plot(psd[0].detach().cpu().numpy(), color='blue')
+                    ax2.plot(y_psd[0].detach().cpu().numpy(), color='red')
+                    ax2.axvline(x=psd[0].detach().cpu().numpy().argmax(), color='blue', linestyle='--')
+                    ax2.axvline(x=y_psd[0].detach().cpu().numpy().argmax(), color='red', linestyle='--')
+
+                    ax2.axvline(x=120, color='gray', linestyle='-')
+                    ax2.axvline(x=540, color='gray', linestyle='-')
+
+                    plt.suptitle('Various Straight Lines', fontsize=20)
+
+                    title = f"iter_count:{idx},error:{round(float(error), 2)},"
+                    plt.suptitle(title, fontsize=20)
+
+                    plt.show()
+                    plt.close()
+                    plt.clf()
 
                 for idx in range(batch_size):
                     subj_index = test_batch[2][idx]

@@ -21,6 +21,7 @@ from neural_methods.utils.utils import set_named_submodule, get_named_submodule
 import time
 
 import wandb
+from evaluation import post_process
 import gc
 
 WEIGHT_UPDATE = True
@@ -134,6 +135,9 @@ class Tent(nn.Module):
         self.sm_scale = sm_scale
         self.fc_scale = fc_scale
 
+        self.params_old ={name: param.clone().detach() for name, param in self.model.named_parameters()}
+
+
     def forward(self, x , y):
         if self.episodic:
             self.reset()
@@ -145,7 +149,12 @@ class Tent(nn.Module):
         for index in range(self.steps):
             outputs ,(fw_cnt,bw_cnt), (freq_error,total_loss) = forward_and_adapt\
                 (x, y , self.model, self.optimizer, self.model_name, self.iter,self.b_scale,self.s_scale,self.v_scale,
-                 self.sm_scale,self.fc_scale)
+                 self.sm_scale,self.fc_scale, self.params_old)
+
+            tmp = torch.sum(y,dim=1)
+            tmp2 = torch.sum(outputs[0],dim=1)
+
+            print (tmp,tmp2)
 
             self.tta_fw_cnt += fw_cnt
             self.tta_bw_cnt += bw_cnt
@@ -207,18 +216,23 @@ def get_filtered_freqs_psd(y):
     low_hz = float(0.66666667)
     high_hz = float(3.0)
 
-    y_ = torch_detrend(torch.cumsum(y, axis=0), torch.tensor(100.0))
+    y_ = _detrend(np.cumsum(y),100)
+    #y_ = torch_detrend(torch.cumsum(y, axis=0), torch.tensor(100.0))
 
     # bandpass filter between [0.75, 2.5] Hz
     # equals [45, 150] beats per min
     [b, a] = butter(1, [0.75 / fps * 2, 2.5 / fps * 2], btype='bandpass')
-    y_ = scipy.signal.filtfilt(b, a, np.double(y_.detach().cpu().numpy()))
+    y_ = scipy.signal.filtfilt(b, a, np.double(y_))
 
     y_tensor = torch.from_numpy(y_.copy())
+    y_tensor = y_tensor.unsqueeze(0)
+
     freqs, y_psd = torch_power_spectral_density(y_tensor, fps=fps, low_hz=low_hz, high_hz=high_hz,
                                                 normalize=True, bandpass=False)
 
-    return freqs,y_psd
+    hr = post_process._calculate_fft_hr(y_, fs=fps)
+
+    return freqs,y_psd, hr
 
 def get_loss(x,model):
 
@@ -272,8 +286,18 @@ def get_loss_3d(x,model):
     return test_loss
 
 
+def ewc_loss(model, params_old):
+    total_loss = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad and name.find('ConvBlock1.0')!=-1:
+            loss = ( (param - params_old[name]) ** 2).sum()
+            total_loss+=loss
+            print (name,loss)
+    return  total_loss
+
+
 @torch.enable_grad()  # ensure grads in possible no grad context for testing
-def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale,v_scale,sm_scale,fc_scale):
+def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale,v_scale,sm_scale,fc_scale,params_old):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
@@ -293,12 +317,13 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
     SINC_3d_former = 0
     AUG_CONST = 0
 
+    EWC_LOSS = 0
 
     if model_name == 'EfficientPhys':
         SINC_ORIGIN = 1
-    elif model_name == 'Physnet':
+    elif model_name == 'Physnet' or model_name == 'Physnet_def':
         SINC_3d = 1
-        AUG_CONST  = 1
+        AUG_CONST  = 0
     elif model_name == 'Physformer':
         SINC_3d_former = 1
 
@@ -465,7 +490,7 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
                 speed_list.append(1.0)
                 predictions, _, _, _ = model(data.unsqueeze(0))
 
-            predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)  # normalize
+            #predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)  # normalize
 
             predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
             prediction_list.append(predictions_smooth)
@@ -506,6 +531,12 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
 
         p_target = scipy.signal.filtfilt(b, a, np.double(predictions_batch.detach().cpu().numpy()))
 
+        """
+        if WEIGHT_UPDATE:
+            temp_loss = abs(torch.mean(torch.sum(predictions_batch,dim=1)))
+            print(temp_loss)
+            total_loss +=temp_loss
+        """
         if WEIGHT_UPDATE:
             temporal_smooth_loss = (torch.mean(abs(torch.from_numpy(p_target.copy()).cuda()-predictions_batch))
                                     * sm_scale)
@@ -523,6 +554,7 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
                     x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
                     speed_list.append(speed)
                     predictions, _, _, _ = model(x_aug.unsqueeze(0).cuda())
+                    predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)
                     predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
                     prediction_list.append(predictions_smooth)
 
@@ -536,9 +568,19 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
                 epsilon = 1e-9
                 marginal_entropy_loss = -torch.sum(mean_psd * torch.log(mean_psd + epsilon), dim=1).mean() * 0.1
 
-                # marginal_entropy_loss = torch.var(psd, dim=0).sum() *20
+                marginal_entropy_loss2 = torch.var(prediction_list, dim=0).mean()
+
+                total_loss += marginal_entropy_loss2
+                print("marginal_entropy_loss2:", round(marginal_entropy_loss2.item(), 2))
+
                 total_loss += marginal_entropy_loss
                 print("marginal_entropy_loss:", round(marginal_entropy_loss.item(), 2))
+
+        if WEIGHT_UPDATE and EWC_LOSS:
+            ewc_loss_ = ewc_loss(model, params_old)
+            total_loss += ewc_loss_
+
+            print(ewc_loss_)
 
         if WEIGHT_UPDATE:
             wandb.log( {'sinc_total_loss': sinc_total_loss, 'bandwidth_loss': bandwidth_loss,
@@ -582,6 +624,9 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
 
             predictions_smooth = torch_detrend(predictions.T, torch.tensor(100.0))
             prediction_list.append(predictions_smooth)
+            del predictions,predictions_smooth
+            torch.cuda.empty_cache()
+            gc.collect()
         fw_cnt += 1
 
         prediction_list = torch.stack(prediction_list)
@@ -707,7 +752,7 @@ def load_model_and_optimizer(model, optimizer, model_state, optimizer_state):
     optimizer.load_state_dict(optimizer_state)
 
 
-def configure_model(model):
+def configure_model(model,config):
     """Configure model for use with tent."""
     # train mode, because tent optimizes the model to minimize entropy
 
@@ -722,15 +767,16 @@ def configure_model(model):
 
         print (name)
         """
-        if name.find('Stem') ==-1:
+        if name.find('Stem') != -1:
             continue
-            
         """
-        """
-        if name.find('ConvBlock1') != -1:
-            target_layer = get_named_submodule(model, name)
-            target_layer.requires_grad_(True)
-        """
+
+        if config.ADAPTER.TENT.LEVEL :
+            if name.find('ConvBlock1.0') != -1:
+                target_layer = get_named_submodule(model, name)
+                target_layer.requires_grad_(True)
+
+
         if isinstance(m, nn.BatchNorm2d) or isinstance(m,nn.BatchNorm3d):
             m.requires_grad_(True)
             # force use of batch stats in train and eval modes

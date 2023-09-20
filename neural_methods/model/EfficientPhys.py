@@ -126,3 +126,29 @@ class EfficientPhys(nn.Module):
         out = self.final_dense_2(d11)
 
         return out
+
+
+class EfficientPhys_color(EfficientPhys):
+    def __init__(self, *args, **kwargs):
+        super(EfficientPhys_color, self).__init__(*args, **kwargs)
+
+        # Add a learnable scale_factor parameter
+        #initial_scale = torch.tensor([1.5, 1.5, 1.0])
+        initial_scale = torch.ones(3)
+        self.scale_factor = nn.Parameter(initial_scale, requires_grad=True)  # Initialize with ones
+        self.scale_factor.refine_names("scale_factor")
+
+        initial_bias = torch.zeros(3)
+        self.bias_factor = nn.Parameter(initial_bias, requires_grad=True)  # Initialize with ones
+        self.bias_factor.refine_names("bias_factor")
+
+    def forward(self, input_image):
+
+        scaled_image = (input_image * self.scale_factor.view(1, 3, 1, 1)
+                        + self.bias_factor.view(1, 3, 1, 1))
+
+        #print (self.scale_factor, self.bias_factor)
+
+        original_outputs = super().forward(scaled_image)
+
+        return original_outputs

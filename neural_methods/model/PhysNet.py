@@ -111,8 +111,8 @@ class PhysNet_padding_Encoder_Decoder_MAX(nn.Module):
         x = self.MaxpoolSpa(x_visual1616)  # x [64, T/4, 8,8]
 
         x = self.ConvBlock8(x)  # x [64, T/4, 8, 8]
-        x = self.ConvBlock9(x)  # x [64, T/4, 8, 8]
-        x = self.upsample(x)  # x [64, T/2, 8, 8]
+        features_before_pooling = self.ConvBlock9(x)  # x [64, T/4, 8, 8]
+        x = self.upsample(features_before_pooling)  # x [64, T/2, 8, 8]
         x = self.upsample2(x)  # x [64, T, 8, 8]
 
         # x [64, T, 1,1]    -->  groundtruth left and right - 7
@@ -121,4 +121,63 @@ class PhysNet_padding_Encoder_Decoder_MAX(nn.Module):
 
         rPPG = x.view(-1, length)
 
-        return rPPG, x_visual, x_visual3232, x_visual1616
+        return rPPG, x_visual, x_visual3232, x_visual1616 , features_before_pooling
+
+
+class PhysNet_padding_Encoder_Decoder_MAX_color(PhysNet_padding_Encoder_Decoder_MAX):
+    def __init__(self, *args, **kwargs):
+        super(PhysNet_padding_Encoder_Decoder_MAX_color, self).__init__(*args, **kwargs)
+
+        # Add a learnable scale_factor parameter
+        #initial_scale = torch.tensor([1.5, 1.5, 1.0])
+        initial_scale = torch.ones(3)
+        self.scale_factor = nn.Parameter(initial_scale, requires_grad=True)  # Initialize with ones
+        self.scale_factor.refine_names("scale_factor")
+
+        initial_bias = torch.zeros(3)
+        self.bias_factor = nn.Parameter(initial_bias, requires_grad=True)  # Initialize with ones
+        self.bias_factor.refine_names("bias_factor")
+
+    def forward(self, input_image):
+
+        scaled_image = (input_image * self.scale_factor.view(1, 3, 1, 1, 1)
+                        + self.bias_factor.view(1, 3, 1, 1, 1))
+
+        #scaled_image = (input_image * self.scale_factor.view(1, 3, 1, 1, 1))
+
+        original_outputs = super().forward(scaled_image)
+
+        return original_outputs
+
+
+class PhysNet_padding_Encoder_Decoder_MAX_1x1conv(PhysNet_padding_Encoder_Decoder_MAX):
+    def __init__(self, *args, **kwargs):
+        super(PhysNet_padding_Encoder_Decoder_MAX_1x1conv, self).__init__(*args, **kwargs)
+
+        # Add a conv1x1 layer
+        self.conv2d_1x1_layer = nn.Conv2d(in_channels=3, out_channels=3, kernel_size=(1, 1))
+        #self.conv1d_layer = nn.Conv1d(in_channels=3, out_channels=3, kernel_size=1)
+        self.conv2d_1x1_layer.name = "scale_factor"
+
+        # Initialize weights and bias
+        nn.init.ones_(self.conv2d_1x1_layer.weight)
+        nn.init.zeros_(self.conv2d_1x1_layer.bias)
+
+    def forward(self, input_image):
+        # Real input_image shape is (batch_size, channel, depth, width, height)
+        batch_size, channel, depth, width, height = input_image.shape
+
+        # Reshape for conv2d layer
+        reshaped_image = input_image.view(-1, channel, width, height)
+
+        # Apply the conv2d layer
+        conv_output = self.conv2d_1x1_layer(reshaped_image)
+
+        # Reshape back to original shape
+        conv_output = conv_output.view(batch_size, channel, depth, width, height)
+
+        # Pass through the original network
+        original_outputs = super().forward(conv_output)
+
+        return original_outputs
+

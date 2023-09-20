@@ -32,7 +32,8 @@ import torch
 import torch.optim as optim
 from evaluation.metrics import calculate_metrics
 from neural_methods.loss.PhysNetNegPearsonLoss import Neg_Pearson
-from neural_methods.model.PhysNet import PhysNet_padding_Encoder_Decoder_MAX
+from neural_methods.model.PhysNet import (PhysNet_padding_Encoder_Decoder_MAX, PhysNet_padding_Encoder_Decoder_MAX_color
+,PhysNet_padding_Encoder_Decoder_MAX_1x1conv)
 from neural_methods.model.PhysNet_def import PhysNet_padding_Encoder_Decoder_MAX_def
 from neural_methods.trainer.BaseTrainer import BaseTrainer
 from torch.autograd import Variable
@@ -40,9 +41,15 @@ from tqdm import tqdm
 
 import neural_methods.trainer.tent as tent
 from neural_methods.adapter import build_adapter
+from sklearn.manifold import TSNE
+from matplotlib.colors import ListedColormap
+from matplotlib.colors import Normalize
 
+from tent import get_filtered_freqs_psd
 
 DEBUG = 0
+SAVE = 0
+SAVE_WEIGHTS = 0
 
 class PhysnetTrainer(BaseTrainer):
 
@@ -62,6 +69,12 @@ class PhysnetTrainer(BaseTrainer):
 
         if config.MODEL.NAME =='Physnet_def':
             self.model = PhysNet_padding_Encoder_Decoder_MAX_def(
+                frames=config.MODEL.PHYSNET.FRAME_NUM).to(self.device)
+        elif config.MODEL.NAME =='Physnet_color':
+            self.model = PhysNet_padding_Encoder_Decoder_MAX_color(
+                frames=config.MODEL.PHYSNET.FRAME_NUM).to(self.device)
+        elif config.MODEL.NAME =='Physnet_1x1conv':
+            self.model = PhysNet_padding_Encoder_Decoder_MAX_1x1conv(
                 frames=config.MODEL.PHYSNET.FRAME_NUM).to(self.device)
         else:
             self.model = PhysNet_padding_Encoder_Decoder_MAX(
@@ -94,7 +107,7 @@ class PhysnetTrainer(BaseTrainer):
             tbar = tqdm(data_loader["train"], ncols=80)
             for idx, batch in enumerate(tbar):
                 tbar.set_description("Train epoch %s" % epoch)
-                rPPG, x_visual, x_visual3232, x_visual1616 = self.model(
+                rPPG, x_visual, x_visual3232, x_visual1616, features_before_pooling = self.model(
                     batch[0].to(torch.float32).to(self.device))
                 BVP_label = batch[1].to(
                     torch.float32).to(self.device)
@@ -170,7 +183,18 @@ class PhysnetTrainer(BaseTrainer):
         if self.config.TOOLBOX_MODE == "only_test":
             if not os.path.exists(self.config.INFERENCE.MODEL_PATH):
                 raise ValueError("Inference model path error! Please check INFERENCE.MODEL_PATH in your yaml.")
-            self.model.load_state_dict(torch.load(self.config.INFERENCE.MODEL_PATH))
+
+            # Load the state_dict from the saved model
+            saved_state_dict = torch.load(self.config.INFERENCE.MODEL_PATH)
+            # Create a new state_dict without the 'model.' prefix
+            new_state_dict = {k.replace("model.", ""): v for k, v in saved_state_dict.items()}
+            # Load the new state_dict into the model
+            incompatible_keys = self.model.load_state_dict(new_state_dict, strict=False)
+
+            print(f"Missing keys: {incompatible_keys.missing_keys}")
+            print(f"Unexpected keys: {incompatible_keys.unexpected_keys}")
+
+            #self.model.load_state_dict(torch.load(self.config.INFERENCE.MODEL_PATH))
             print("Testing uses pretrained model!")
             print(self.config.INFERENCE.MODEL_PATH)
         else:
@@ -189,12 +213,35 @@ class PhysnetTrainer(BaseTrainer):
 
         self.model = self.model.to(self.config.DEVICE)
         self.model.eval()
+
+        hr_log = []
+        feature_log = []
+        subj_log =[]
+
         with torch.no_grad():
             for idx, test_batch in enumerate(data_loader['test']):
                 batch_size = test_batch[0].shape[0]
                 data, label = test_batch[0].to(
                     self.config.DEVICE), test_batch[1].to(self.config.DEVICE)
-                pred_ppg_test, _, _, _ = self.model(data)
+                pred_ppg_test, x_visual, x_visual3232, x_visual1616 , features_before_pooling = self.model(data)
+
+                subj = test_batch[2]
+
+                if SAVE:
+                    print (x_visual1616.shape)
+
+                    predictions_np = pred_ppg_test.detach().cpu().numpy()
+
+                    for idx,predictions_ in  enumerate(predictions_np):
+                        #predictions_ = (predictions_ - np.mean(predictions_)) / np.std(predictions_)
+                        #freqs, psd, hr_p = tent.get_filtered_freqs_psd(predictions_)
+
+                        freqs, psd, hr_p = tent.get_filtered_freqs_psd(label.detach().cpu().numpy())
+                        hr_log.append(hr_p)
+                        feature_log.append(x_visual1616[idx].detach().cpu().numpy())
+                        subj_log.append(list(subj)[idx])
+                        print (hr_p, list(subj)[idx])
+
                 if DEBUG:
                     ax1 = plt.subplot(2, 1, 1)
 
@@ -241,15 +288,80 @@ class PhysnetTrainer(BaseTrainer):
                     predictions[subj_index][sort_index] = pred_ppg_test[idx]
                     labels[subj_index][sort_index] = label[idx]
 
+
+        if SAVE:
+
+            norm = Normalize(vmin=min(hr_log), vmax=max(hr_log))
+            cmap = ListedColormap(plt.cm.jet(np.linspace(0, 1, len(hr_log))))
+
+            features = np.array(feature_log)
+            flattened_features = np.reshape(features, (features.shape[0] , -1))
+
+            tsne = TSNE(n_components=2)  # You can change n_components to 3 for 3D visualization
+            embedded_features = tsne.fit_transform(flattened_features)
+
+
+            sub_list = []
+            for sub in subj_log:
+                sub_list.append(sub.split("_")[0])
+
+            unique_subjs = list(set(sub_list))
+
+            print ("unique_subjs:",len(unique_subjs))
+            edge_colors = plt.cm.gist_rainbow(np.linspace(0, 1, len(unique_subjs)))  # You can choose a different colormap
+
+            for idx, hr in enumerate(hr_log):
+                hr_color = cmap(norm(hr))
+                subj = subj_log[idx]
+                subj_color = edge_colors[unique_subjs.index(subj)]
+
+                if subj.find("L3")!=-1:
+                    marker_shape ='o'
+                else:
+                    marker_shape = '*'
+
+                plt.scatter(embedded_features[idx, 0], embedded_features[idx, 1], c=hr_color,linewidths=2,
+                            cmap="gist_rainbow", marker=marker_shape)
+                #plt.scatter(embedded_features[idx, 0], embedded_features[idx, 1], c=color,
+                #            edgecolors=edge_color, linewidths=2, cmap="gist_rainbow")
+
+            #scatter = plt.scatter(embedded_features[:, 0], embedded_features[:, 1],c=hr_log, cmap=cmap)
+            #plt.colorbar(scatter, label='hr_log')
+            plt.colorbar(label='hr_log')
+            plt.title('t-SNE Visualization')
+            plt.xlabel('Dimension 1')
+            plt.ylabel('Dimension 2')
+            plt.show()
+
+            plt.hist(hr_log,bins=100)
+            plt.show()
+
+
         print('')
         calculate_metrics(predictions, labels, self.config)
 
     def save_model(self, index):
+
+        # 기존 state_dict 불러오기
+        original_state_dict = self.model.state_dict()
+
+        # 새로운 state_dict 초기화
+        new_state_dict = {}
+
+        # 키에서 'model.' 접두어가 있는지 확인하고 제거
+        for k, v in original_state_dict.items():
+            if k.startswith('model.'):
+                name = k[6:]  # 'model.' 접두어 제거
+            else:
+                name = k
+            new_state_dict[name] = v
+
+
         if not os.path.exists(self.model_dir):
             os.makedirs(self.model_dir)
         model_path = os.path.join(
             self.model_dir, self.model_file_name + '_Epoch' + str(index) + '.pth')
-        torch.save(self.model.state_dict(), model_path)
+        torch.save(new_state_dict, model_path)
         print('Saved Model Path: ', model_path)
 
     def setup_optimizer(self, params):
@@ -287,13 +399,19 @@ class PhysnetTrainer(BaseTrainer):
         """
         model = tent.configure_model(model,self.config)
         params, param_names = tent.collect_params(model)
+
+        if self.config.MODEL.NAME == 'Physnet_color':
+            model.scale_factor.requires_grad = True
+            params.append(model.scale_factor)
+            model.bias_factor.requires_grad = True
+            params.append(model.bias_factor)
+
         optimizer = self.setup_optimizer(params)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,mode='min',patience=2)
+        #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
 
-        print (optimizer)
 
-
-
-        tent_model = tent.Tent(model, optimizer,
+        tent_model = tent.Tent(model, optimizer,scheduler,
                                steps=self.config.OPTIM.STEPS,
                                episodic=self.config.MODEL.EPISODIC,
                                model_name=self.config.MODEL.NAME,
@@ -317,13 +435,29 @@ class PhysnetTrainer(BaseTrainer):
         predictions = dict()
         labels = dict()
 
-        if not os.path.exists(self.config.INFERENCE.MODEL_PATH):
+        if self.config.INFERENCE.MODEL_PATH and not os.path.exists(self.config.INFERENCE.MODEL_PATH):
             raise ValueError("Inference model path error! Please check INFERENCE.MODEL_PATH in your yaml.")
-        self.model.load_state_dict(torch.load(self.config.INFERENCE.MODEL_PATH))
-        print("Testing uses pretrained model!")
+
+        if self.config.INFERENCE.MODEL_PATH:
+            state_dict = torch.load(self.config.INFERENCE.MODEL_PATH)
+            #state_dict.pop("scale_factor", None)
+            #state_dict.pop("bias_factor", None)
+
+            incompatible_keys = self.model.load_state_dict(state_dict,strict=False)
+
+            print(f"Missing keys: {incompatible_keys.missing_keys}")
+            print(f"Unexpected keys: {incompatible_keys.unexpected_keys}")
+
+            print("Testing uses pretrained model!")
 
         self.model = self.model.to(self.config.DEVICE)
         self.model = self.setup_tent(self.model)
+
+        hr_log = []
+        feature_log = []
+        subj_log =[]
+        current_subj = 0
+        last_subj = 0
 
         #self.model.eval()
         with torch.no_grad():
@@ -332,10 +466,78 @@ class PhysnetTrainer(BaseTrainer):
                 batch_size = test_batch[0].shape[0]
                 data, label = test_batch[0].to(
                     self.config.DEVICE), test_batch[1].to(self.config.DEVICE)
-                pred_ppg_test, _, _, _ = self.model(data,label)
+                pred_ppg_test, x_visual, x_visual3232, x_visual1616, features_before_pooling = self.model(data,label)
                 pred_ppg_test = pred_ppg_test.detach()
 
-                print (test_batch[2],test_batch[3])
+                subj = test_batch[2]
+                current_subj = subj[-1]
+                print (current_subj,last_subj)
+
+
+                # debug label #
+                """
+                pred_ppg_test =( pred_ppg_test - pred_ppg_test.mean()) / pred_ppg_test.std()
+                label = (label - label.mean()) / label.std()
+
+                for idx in range(data.shape[0]):
+                    freqs, psd_predict, hr_predict = tent.get_filtered_freqs_psd(pred_ppg_test.cpu().numpy()[idx])
+                    freqs, psd_label, hr_label = tent.get_filtered_freqs_psd(label.cpu().numpy()[idx])
+
+                    label_error = abs(hr_predict-hr_label)
+                    plt.title(str(label_error))
+                    plt.plot(pred_ppg_test.cpu().numpy()[idx])
+                    plt.plot(label.detach().cpu().numpy()[idx])
+                    #label = tent._detrend(np.cumsum(label.detach().cpu().numpy()), 100)
+                    plt.show()
+                """
+                #if current_subj != last_subj:
+                #    self.model.reset()
+
+                last_subj = current_subj
+
+                if SAVE:
+
+                    # print (x_visual1616.shape)
+                    predictions_np = pred_ppg_test.detach().cpu().numpy()
+                    batch_log = []
+                    for idx, predictions_ in enumerate(predictions_np):
+                        #predictions_ = (predictions_ - np.mean(predictions_)) / np.std(predictions_)
+                        freqs, psd, hr_p = tent.get_filtered_freqs_psd(predictions_)
+                        #freqs, psd, hr_p = tent.get_filtered_freqs_psd(label.detach().cpu().numpy())
+                        print(hr_p)
+                        hr_log.append(hr_p)
+                        feature_log.append(x_visual3232[idx].detach().cpu().numpy())
+                        batch_log.append(x_visual3232[idx].detach().cpu().numpy())
+                        subj_log.append(list(subj)[idx])
+                        #print(hr_p, list(subj)[idx])
+
+                    batch_log = np.array(batch_log)
+                    flattened_features = [feature.flatten() for feature in batch_log]
+
+                    # 거리를 저장할 변수 초기화
+                    max_distance = 0
+                    pair = (0, 0)
+
+                    # 평균 거리를 저장할 변수 초기화
+                    total_distance = 0
+                    count = 0
+
+                    # 연속된 feature 쌍에 대한 거리 계산
+                    for i in range(len(flattened_features) - 1):
+                        j = i + 1
+                        distance = np.linalg.norm(flattened_features[i] - flattened_features[j])
+                        total_distance += distance
+                        count += 1
+                        if distance > max_distance:
+                            max_distance = distance
+                            pair = (i, j)
+
+                    # 평균 거리 계산
+                    average_distance = total_distance / count
+                    # 평균 거리 대비 max_distance 계산
+                    relative_max_distance = max_distance / average_distance
+
+                    print(f"The maximum distance is {relative_max_distance} between feature {pair[0]} and feature {pair[1]}")
 
                 if DEBUG:
                     ax1 = plt.subplot(2, 1, 1)
@@ -388,25 +590,79 @@ class PhysnetTrainer(BaseTrainer):
         print("total_foward_count:",self.model.tta_fw_cnt)
         print("total_backward_count:",self.model.tta_bw_cnt)
 
+        if SAVE_WEIGHTS:
+            self.save_model(self.config.OPTIM.STEPS)
 
-        freq_error_list = np.array(self.model.freq_error_list)
-        total_loss_list = np.array(self.model.total_loss_list)
+        if SAVE:
 
-        data = {
-        'freq_error':freq_error_list,
-        'sinc_loss':total_loss_list}
-        df =pd.DataFrame(data)
-        scatter_data = wandb.Table(dataframe=df, allow_mixed_types=True)
-        scatter_plot = wandb.plot.scatter(scatter_data, x='sinc_loss', y='freq_error', title='sincXfreq')
-        wandb.log({"scatter_plot_all": scatter_plot})
+            norm = Normalize(vmin=min(hr_log), vmax=max(hr_log))
 
-        data = {
-            'freq_error(mean)': freq_error_list.mean(),
-            'sinc_loss(mean)': total_loss_list.mean()}
-        df2 = pd.DataFrame(data,index = [0])
-        scatter_data2 = wandb.Table(dataframe=df2, allow_mixed_types=True)
-        scatter_plot2 = wandb.plot.scatter(scatter_data2, x='sinc_loss(mean)', y='freq_error(mean)', title='sincXfreq(mean)')
-        wandb.log({"scatter_plot_mean": scatter_plot2})
+            cmap = ListedColormap(plt.cm.jet(np.linspace(0, 1, len(hr_log))))
+
+            features = np.array(feature_log)
+            flattened_features = np.reshape(features, (features.shape[0] , -1))
+
+            tsne = TSNE(n_components=2)  # You can change n_components to 3 for 3D visualization
+            embedded_features = tsne.fit_transform(flattened_features)
+
+            sub_list = []
+            for sub in subj_log:
+                sub_list.append(sub.split("_")[0])
+
+            unique_subjs = list(set(sub_list))
+
+            print("unique_subjs:", len(unique_subjs))
+            edge_colors = plt.cm.gist_rainbow(
+                np.linspace(0, 1, len(unique_subjs)))  # You can choose a different colormap
+
+            for idx, hr in enumerate(hr_log):
+                hr_color = cmap(norm(hr))
+                subj_info = subj_log[idx]
+                subj = subj_info.split("_")[0]
+
+                subj_color = edge_colors[unique_subjs.index(subj)]
+
+                if subj_info.find("L3")!=-1:
+                    marker_shape ='o'
+                else:
+                    marker_shape = '*'
+
+                plt.scatter(embedded_features[idx, 0], embedded_features[idx, 1], c=hr_color,linewidths=2,
+                            cmap="gist_rainbow", marker=marker_shape)
+
+                # plt.scatter(embedded_features[idx, 0], embedded_features[idx, 1], c=color,
+                #            edgecolors=edge_color, linewidths=2, cmap="gist_rainbow")
+
+            # scatter = plt.scatter(embedded_features[:, 0], embedded_features[:, 1],c=hr_log, cmap=cmap)
+            # plt.colorbar(scatter, label='hr_log')
+            #plt.colorbar(label='hr_log')
+            plt.title('t-SNE Visualization')
+            plt.xlabel('Dimension 1')
+            plt.ylabel('Dimension 2')
+            plt.show()
+
+            plt.hist(hr_log, bins=100)
+            plt.show()
+
+        if DEBUG:
+            freq_error_list = np.array(self.model.freq_error_list)
+            total_loss_list = np.array(self.model.total_loss_list)
+
+            data = {
+            'freq_error':freq_error_list,
+            'sinc_loss':total_loss_list}
+            df =pd.DataFrame(data)
+            scatter_data = wandb.Table(dataframe=df, allow_mixed_types=True)
+            scatter_plot = wandb.plot.scatter(scatter_data, x='sinc_loss', y='freq_error', title='sincXfreq')
+            wandb.log({"scatter_plot_all": scatter_plot})
+
+            data = {
+                'freq_error(mean)': freq_error_list.mean(),
+                'sinc_loss(mean)': total_loss_list.mean()}
+            df2 = pd.DataFrame(data,index = [0])
+            scatter_data2 = wandb.Table(dataframe=df2, allow_mixed_types=True)
+            scatter_plot2 = wandb.plot.scatter(scatter_data2, x='sinc_loss(mean)', y='freq_error(mean)', title='sincXfreq(mean)')
+            wandb.log({"scatter_plot_mean": scatter_plot2})
 
 
 

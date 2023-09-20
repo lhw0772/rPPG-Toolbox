@@ -34,6 +34,10 @@ general_generator.manual_seed(RANDOM_SEED)
 train_generator = torch.Generator()
 train_generator.manual_seed(RANDOM_SEED)
 
+from torch.utils.data import ConcatDataset
+
+
+DATA_CONCAT = False
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2 ** 32
@@ -93,11 +97,12 @@ def train_and_test(config, data_loader_dict):
 
 def test(config, data_loader_dict):
     """Tests the model."""
-    if config.MODEL.NAME == "Physnet"  or config.MODEL.NAME =='Physnet_def':
+    if (config.MODEL.NAME == "Physnet"  or config.MODEL.NAME =='Physnet_def' or config.MODEL.NAME == 'Physnet_color'
+            or config.MODEL.NAME =='Physnet_1x1conv'):
         model_trainer = trainer.PhysnetTrainer.PhysnetTrainer(config, data_loader_dict)
     elif config.MODEL.NAME == "Tscan":
         model_trainer = trainer.TscanTrainer.TscanTrainer(config, data_loader_dict)
-    elif config.MODEL.NAME == "EfficientPhys":
+    elif config.MODEL.NAME == "EfficientPhys" or config.MODEL.NAME == 'EfficientPhys_color':
         model_trainer = trainer.EfficientPhysTrainer.EfficientPhysTrainer(config, data_loader_dict)
     elif config.MODEL.NAME == 'DeepPhys':
         model_trainer = trainer.DeepPhysTrainer.DeepPhysTrainer(config, data_loader_dict)
@@ -279,6 +284,12 @@ if __name__ == "__main__":
                 name="test",
                 data_path=config.TEST.DATA.DATA_PATH,
                 config_data=config.TEST.DATA)
+
+            # 데이터셋을 두 번 반복하도록 ConcatDataset을 사용
+
+            if DATA_CONCAT:
+                test_data = ConcatDataset([test_data, test_data])
+
             data_loader_dict["test"] = DataLoader(
                 dataset=test_data,
                 num_workers=0, # num_workers= 16

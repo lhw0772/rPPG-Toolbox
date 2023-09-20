@@ -9,7 +9,7 @@ import torch
 import torch.optim as optim
 from evaluation.metrics import calculate_metrics
 from neural_methods.loss.NegPearsonLoss import Neg_Pearson
-from neural_methods.model.EfficientPhys import EfficientPhys
+from neural_methods.model.EfficientPhys import EfficientPhys,EfficientPhys_color
 from neural_methods.trainer.BaseTrainer import BaseTrainer
 from tqdm import tqdm
 
@@ -51,9 +51,14 @@ class EfficientPhysTrainer(BaseTrainer):
             self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 self.optimizer, max_lr=config.TRAIN.LR, epochs=config.TRAIN.EPOCHS, steps_per_epoch=self.num_train_batches)
         elif config.TOOLBOX_MODE == "only_test":
-            self.model = EfficientPhys(frame_depth=self.frame_depth, img_size=config.TEST.DATA.PREPROCESS.RESIZE.H).to(
-                self.device)
-            self.model = torch.nn.DataParallel(self.model, device_ids=list(range(config.NUM_OF_GPU_TRAIN)))
+
+            if config.MODEL.NAME == 'EfficientPhys_color':
+                self.model = (EfficientPhys_color(frame_depth=self.frame_depth, img_size=config.TEST.DATA.PREPROCESS.RESIZE.H).
+                to(self.device))
+            else:
+                self.model = (EfficientPhys(frame_depth=self.frame_depth, img_size=config.TEST.DATA.PREPROCESS.RESIZE.H).
+                    to(self.device))
+            #self.model = torch.nn.DataParallel(self.model, device_ids=list(range(config.NUM_OF_GPU_TRAIN)))
         else:
             raise ValueError("EfficientPhys trainer initialized in incorrect toolbox mode!")
 
@@ -245,8 +250,16 @@ class EfficientPhysTrainer(BaseTrainer):
         collect the parameters for feature modulation by gradient optimization,
         set up the optimizer, and then tent the model.
         """
-        model = tent.configure_model(model)
+        model = tent.configure_model(model,self.config)
         params, param_names = tent.collect_params(model)
+
+
+        if self.config.MODEL.NAME == 'EfficientPhys_color':
+            model.scale_factor.requires_grad = True
+            params.append(model.scale_factor)
+            model.bias_factor.requires_grad = True
+            params.append(model.bias_factor)
+
         optimizer = self.setup_optimizer(params)
         tent_model = tent.Tent(model, optimizer,
                                steps=self.config.OPTIM.STEPS,
@@ -269,7 +282,20 @@ class EfficientPhysTrainer(BaseTrainer):
 
         if not os.path.exists(self.config.INFERENCE.MODEL_PATH):
             raise ValueError("Inference model path error! Please check INFERENCE.MODEL_PATH in your yaml.")
-        self.model.load_state_dict(torch.load(self.config.INFERENCE.MODEL_PATH))
+
+        state_dict = torch.load(self.config.INFERENCE.MODEL_PATH)
+        #state_dict.pop("scale_factor", None)
+        #state_dict.pop("bias_factor", None)
+        #self.model.load_state_dict(state_dict,strict=False)
+
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            name = k[7:]  # remove 'module.' of DataParallel
+            new_state_dict[name] = v
+
+        self.model.load_state_dict(new_state_dict,strict=False)
+
+        #self.model.load_state_dict(state_dict)
         print("Testing uses pretrained model!")
 
         self.model = self.model.to(self.config.DEVICE)

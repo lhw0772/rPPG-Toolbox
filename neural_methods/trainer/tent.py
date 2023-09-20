@@ -24,12 +24,29 @@ import wandb
 from evaluation import post_process
 import gc
 
+USE_SCHEDULER = False
+NON_TENT_SET = False
 WEIGHT_UPDATE = True
 
 EPSILON = 1e-10
 BP_LOW=2/3
 BP_HIGH=3.0
 BP_DELTA=0.1
+
+DEBUG= False
+
+PARTIAL_UPDATE = 0
+
+if PARTIAL_UPDATE == 1: # 1%
+    TRAIN_MAX = 1
+elif PARTIAL_UPDATE == 5: # 5%
+    TRAIN_MAX = 6
+elif PARTIAL_UPDATE == 10: # 10%
+    TRAIN_MAX = 13
+elif PARTIAL_UPDATE == 20: # 20%
+    TRAIN_MAX = 26
+else:
+    TRAIN_MAX = 1000000
 
 import gc
 def find_nearest_index(tensor_list, value):
@@ -107,11 +124,12 @@ class Tent(nn.Module):
 
     Once tented, a model adapts itself by updating on every forward.
     """
-    def __init__(self, model, optimizer, steps=1, episodic=False, model_name='None', b_scale=1.0 , s_scale=1.0,
+    def __init__(self, model, optimizer,scheduler, steps=1, episodic=False, model_name='None', b_scale=1.0 , s_scale=1.0,
                  v_scale=1.0, sm_scale=0.1 , fc_scale=5.0):
         super().__init__()
         self.model = model
         self.optimizer = optimizer
+        self.scheduler = scheduler
         self.steps = steps
         assert steps > 0, "tent requires >= 1 step(s) to forward and update"
         self.episodic = episodic
@@ -146,15 +164,52 @@ class Tent(nn.Module):
         error_list = []
         index_list = []
 
+        """
+        batch_log = []
+        pred_ppg_test, x_visual, x_visual3232, x_visual1616, features_before_pooling = self.model(x)
+        predictions_np = pred_ppg_test.detach().cpu().numpy()
+        for idx, predictions_ in enumerate(predictions_np):
+            batch_log.append(x_visual3232[idx].detach().cpu().numpy())
+
+        batch_log = np.array(batch_log)
+        flattened_features = [feature.flatten() for feature in batch_log]
+
+        # 거리를 저장할 변수 초기화
+        max_distance = 0
+        pair = (0, 0)
+
+        # 평균 거리를 저장할 변수 초기화
+        total_distance = 0
+        count = 0
+
+        # 연속된 feature 쌍에 대한 거리 계산
+        for i in range(len(flattened_features) - 1):
+            j = i + 1
+            distance = np.linalg.norm(flattened_features[i] - flattened_features[j])
+            total_distance += distance
+            count += 1
+            if distance > max_distance:
+                max_distance = distance
+                pair = (i, j)
+
+        # 평균 거리 계산
+        average_distance = total_distance / count
+        # 평균 거리 대비 max_distance 계산
+        relative_max_distance = max_distance / average_distance
+        print(f"The maximum distance is {relative_max_distance} between feature {pair[0]} and feature {pair[1]}")
+
+        if relative_max_distance>1.1:
+            self.fc_scale = 0.0
+        else:
+            self.fc_scale = 10.0
+
+        """
         for index in range(self.steps):
             outputs ,(fw_cnt,bw_cnt), (freq_error,total_loss) = forward_and_adapt\
-                (x, y , self.model, self.optimizer, self.model_name, self.iter,self.b_scale,self.s_scale,self.v_scale,
+                (x, y , self.model, self.optimizer,self.scheduler, self.model_name, self.iter,self.b_scale,self.s_scale,self.v_scale,
                  self.sm_scale,self.fc_scale, self.params_old)
-
-            tmp = torch.sum(y,dim=1)
-            tmp2 = torch.sum(outputs[0],dim=1)
-
-            print (tmp,tmp2)
+            for param_group in self.optimizer.param_groups:
+                print ('lr :',param_group['lr'])
 
             self.tta_fw_cnt += fw_cnt
             self.tta_bw_cnt += bw_cnt
@@ -174,11 +229,6 @@ class Tent(nn.Module):
         index_list = np.array(index_list)
         color_map = plt.get_cmap('tab10')
         colors = color_map(index_list)
-
-        """
-        plt.scatter(x=np.array(loss_list), y=np.array(error_list),color=colors)
-        plt.show()
-        """
 
 
         return outputs
@@ -289,19 +339,24 @@ def get_loss_3d(x,model):
 def ewc_loss(model, params_old):
     total_loss = 0
     for name, param in model.named_parameters():
-        if param.requires_grad and name.find('ConvBlock1.0')!=-1:
+        if param.requires_grad :
             loss = ( (param - params_old[name]) ** 2).sum()
             total_loss+=loss
-            print (name,loss)
+            #print (name,loss)
     return  total_loss
 
 
 @torch.enable_grad()  # ensure grads in possible no grad context for testing
-def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale,v_scale,sm_scale,fc_scale,params_old):
+def forward_and_adapt(x, y, model, optimizer,scheduler, model_name ,iter, b_scale, s_scale,v_scale,sm_scale,fc_scale,params_old):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
     """
+    global WEIGHT_UPDATE
+
+    if PARTIAL_UPDATE:
+        if iter >= TRAIN_MAX:
+            WEIGHT_UPDATE = False
 
     fw_cnt = 0
     bw_cnt = 0
@@ -318,10 +373,13 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
     AUG_CONST = 0
 
     EWC_LOSS = 0
+    SPATIAL_LOSS= 0
 
-    if model_name == 'EfficientPhys':
+    if model_name == 'EfficientPhys' or model_name =='EfficientPhys_color':
         SINC_ORIGIN = 1
-    elif model_name == 'Physnet' or model_name == 'Physnet_def':
+        #SINC= 1
+    elif (model_name == 'Physnet' or model_name == 'Physnet_def' or model_name =='Physnet_color'
+          or model_name =='Physnet_1x1conv'):
         SINC_3d = 1
         AUG_CONST  = 0
     elif model_name == 'Physformer':
@@ -335,32 +393,13 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
     #initial_params = [param.clone().detach() for param in model.parameters()]
 
     # Save the initial parameters along with their names
-    #initial_params = {name: param.clone().detach() for name, param in model.named_parameters()}
+    initial_params = {name: param.clone().detach() for name, param in model.named_parameters()}
 
     if model_name =='Physformer':
         gra_sharp = 2.0
         predictions_ = model(x,gra_sharp)
     else:
         predictions_ = model(x)
-
-
-    if SINC_3d :
-        iter_num = 1
-
-
-    """
-    model.eval()
-    loss_ = get_loss(x, model)
-    model.train()
-    """
-
-    """
-    for name, param in model.named_parameters():
-        if has_parameter_changed(initial_params[name], param):
-            print(f"Parameter '{name}' has changed during training.")
-        else:
-            print(f"Parameter '{name}' remains unchanged.")
-    """
 
 
     if MC_DROP:
@@ -396,7 +435,11 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
         # model.train()
         auginfo = Auginfo(x.shape[0])
 
-        x_aug, speed = sinc_aug.apply_transformations(auginfo, x.permute(0, 2, 3, 1).cpu().numpy())  # [C,T,H,W]
+        if auginfo.aug_speed:
+            x_aug, speed = sinc_aug.apply_transformations(auginfo, x.permute(0, 2, 3, 1).cpu().numpy())  # [C,T,H,W]
+        else:
+            x_aug, speed = sinc_aug.apply_transformations(auginfo, x.permute(1, 0, 2, 3).cpu().numpy())
+
         predictions = model(x_aug.permute(1, 0, 2, 3))
         predictions_smooth = torch_detrend(torch.cumsum(predictions, axis=0), torch.tensor(100.0))
 
@@ -418,6 +461,7 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
         sinc_total_loss = bandwidth_loss + variance_loss + sparsity_loss
         total_loss += sinc_total_loss
 
+        freq_error = torch.tensor(0.0)
 
     if SINC:
         #model.train()
@@ -441,7 +485,14 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
                     data_test = x_copy[idx]
                     last_frame = torch.unsqueeze(data_test[-1, :, :, :], 0).repeat(1, 1, 1, 1)
                     data_test = torch.cat((data_test, last_frame), 0)
-                    x_aug, speed = sinc_aug.apply_transformations(auginfo, data_test.permute(0,2,3,1).cpu().numpy()) # [T,H,W,C]
+
+                    if auginfo.aug_speed:
+                        x_aug, speed = sinc_aug.apply_transformations(auginfo,
+                                                                      data_test.permute(0, 2, 3, 1).cpu().numpy())  # [C,T,H,W]
+                    else:
+                        x_aug, speed = sinc_aug.apply_transformations(auginfo,
+                                                                      data_test.permute(1, 0, 2, 3).cpu().numpy())
+
                     predictions = model(x_aug.permute(1,0,2,3))
                     predictions_smooth = torch_detrend(torch.cumsum(predictions, axis=0), torch.tensor(100.0))
                     prediction_list.append(predictions_smooth)
@@ -472,11 +523,51 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
 
         sinc_total_loss  = bandwidth_loss + variance_loss + sparsity_loss
         total_loss += sinc_total_loss
+        freq_error = torch.tensor(0.0)
 
     if SINC_3d:
 
         total_loss = 0.0
         auginfo = Auginfo(x.shape[2])
+
+        if SPATIAL_LOSS:
+            freq_list = []
+            result_list = []
+
+            result_a,_,_,_,_ = model(x[..., :54, :54])
+            result_b,_,_,_,_  = model(x[..., :54, 18:])
+            result_c,_,_,_,_  = model(x[..., 18:, :84])
+            result_d,_,_,_,_  = model(x[..., 18:, 18:])
+
+            freqs, psd_a = torch_power_spectral_density(result_a, fps=fps, low_hz=low_hz, high_hz=high_hz, normalize=True,
+                                                      bandpass=False)
+            freqs, psd_b = torch_power_spectral_density(result_b, fps=fps, low_hz=low_hz, high_hz=high_hz, normalize=True,
+                                                      bandpass=False)
+            freqs, psd_c = torch_power_spectral_density(result_c, fps=fps, low_hz=low_hz, high_hz=high_hz, normalize=True,
+                                                      bandpass=False)
+            freqs, psd_d = torch_power_spectral_density(result_d, fps=fps, low_hz=low_hz, high_hz=high_hz, normalize=True,
+                                                      bandpass=False)
+
+            result_list.append(result_a)
+            result_list.append(result_b)
+            result_list.append(result_c)
+            result_list.append(result_d)
+            freq_list.append(psd_a)
+            freq_list.append(psd_b)
+            freq_list.append(psd_c)
+            freq_list.append(psd_d)
+
+            freq_list = torch.stack(freq_list)
+            result_list = torch.stack(result_list)
+
+            #spatial_var_loss1 = torch.var(freq_list,dim=0).sum()
+            #spatial_var_loss2 = torch.var(result_list, dim=0).mean()
+
+            #spatial_var_loss = (spatial_var_loss1 + spatial_var_loss2)*0.1
+            spatial_var_loss = abs(freq_list[0]-freq_list[1]).sum(dim=1).mean()
+            total_loss += spatial_var_loss
+        else:
+            spatial_var_loss = torch.tensor(0.0)
 
         prediction_list = []
         speed_list = []
@@ -485,12 +576,12 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
             if AUG:
                 x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
                 speed_list.append(speed)
-                predictions, _, _, _  = model(x_aug.unsqueeze(0).cuda())
+                predictions, _, _, _, _ = model(x_aug.unsqueeze(0).cuda())
             else:
                 speed_list.append(1.0)
-                predictions, _, _, _ = model(data.unsqueeze(0))
+                predictions, _, _, _, _ = model(data.unsqueeze(0))
 
-            #predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)  # normalize
+            predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)  # normalize
 
             predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
             prediction_list.append(predictions_smooth)
@@ -529,7 +620,6 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
 
         freq_error = (torch.mean(abs(freqs[y_psd.argmax(dim=1)] - freqs[psd.argmax(dim=1)]))).detach().cpu().numpy()
 
-        p_target = scipy.signal.filtfilt(b, a, np.double(predictions_batch.detach().cpu().numpy()))
 
         """
         if WEIGHT_UPDATE:
@@ -538,6 +628,8 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
             total_loss +=temp_loss
         """
         if WEIGHT_UPDATE:
+            p_target = scipy.signal.filtfilt(b, a, np.double(predictions_batch.detach().cpu().numpy()))
+
             temporal_smooth_loss = (torch.mean(abs(torch.from_numpy(p_target.copy()).cuda()-predictions_batch))
                                     * sm_scale)
             total_loss += temporal_smooth_loss
@@ -553,7 +645,7 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
                 for aug_idx in range(augmentation_n):
                     x_aug, speed = sinc_aug.apply_transformations(auginfo, data.cpu().numpy())  # [C,T,H,W]
                     speed_list.append(speed)
-                    predictions, _, _, _ = model(x_aug.unsqueeze(0).cuda())
+                    predictions, _, _, _ ,_ = model(x_aug.unsqueeze(0).cuda())
                     predictions = (predictions - torch.mean(predictions)) / torch.std(predictions)
                     predictions_smooth = torch_detrend(torch.cumsum(predictions.T, axis=0), torch.tensor(100.0))
                     prediction_list.append(predictions_smooth)
@@ -588,14 +680,20 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
                         "freq_error": freq_error, "frequency_const_loss": frequency_const_loss,
                         "temporal_smooth_loss":temporal_smooth_loss}, step=iter)
 
+            print ("total_loss:",round(total_loss.item(),2))
+
             print("bandwidth_loss:", round(bandwidth_loss.item(),2), "sparsity_loss:", round(sparsity_loss.item(),2),
-                  "variance_loss:", round(variance_loss.item(),2) ,"frequency_const_loss:", round(frequency_const_loss.item(),2),
-                  "temporal_smooth_loss:", round(temporal_smooth_loss.item(),2))
+                  "variance_loss:", round(variance_loss.item(),2) ,
+                  "frequency_const_loss:", round(frequency_const_loss.item(),2),
+                  "temporal_smooth_loss:", round(temporal_smooth_loss.item(),2) ,
+                  "spatial_var_loss:", round(spatial_var_loss.item(),2))
 
         if WEIGHT_UPDATE:
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
+            if USE_SCHEDULER:
+                scheduler.step(total_loss)
         else:
             optimizer.zero_grad()
 
@@ -624,9 +722,9 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
 
             predictions_smooth = torch_detrend(predictions.T, torch.tensor(100.0))
             prediction_list.append(predictions_smooth)
-            del predictions,predictions_smooth
-            torch.cuda.empty_cache()
-            gc.collect()
+            #del predictions,predictions_smooth
+            #torch.cuda.empty_cache()
+            #gc.collect()
         fw_cnt += 1
 
         prediction_list = torch.stack(prediction_list)
@@ -694,13 +792,13 @@ def forward_and_adapt(x, y, model, optimizer, model_name ,iter, b_scale, s_scale
         total_loss.backward()
         optimizer.step()
 
-    """
-    for name, param in model.named_parameters():
-        if has_parameter_changed(initial_params[name], param):
-            print(f"Parameter '{name}' has changed during training.")
-        else:
-            print(f"Parameter '{name}' remains unchanged.")
-    """
+    if DEBUG:
+        for name, param in model.named_parameters():
+            if has_parameter_changed(initial_params[name], param):
+                print(f"Parameter '{name}' has changed during training.")
+            else:
+                print(f"Parameter '{name}' remains unchanged.")
+
     """
     model.eval()
     predictions_new = model(x)
@@ -761,28 +859,130 @@ def configure_model(model,config):
     else:
         model.eval()
     # disable grad, to (re-)enable only what tent updates
-    model.requires_grad_(False)
-    # configure norm for tent updates: enable grad + force batch statisics
-    for name, m in model.named_modules():
 
-        print (name)
+    if NON_TENT_SET :
+
+        model.requires_grad_(True)
         """
-        if name.find('Stem') != -1:
-            continue
+        for name, m in model.named_modules():
+            
+            if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d):
+                m.requires_grad_(False)
+                m.track_running_stats = False
+                m.running_mean = None
+                m.running_var = None
+
+            else:
+                m.requires_grad_(True)
         """
+    else:
+        model.requires_grad_(False)
+        # configure norm for tent updates: enable grad + force batch statisics
+        for name, m in model.named_modules():
 
-        if config.ADAPTER.TENT.LEVEL :
-            if name.find('ConvBlock1.0') != -1:
-                target_layer = get_named_submodule(model, name)
-                target_layer.requires_grad_(True)
+            print (name)
+
+            #if name =='conv2d_1x1_layer':
+            #    target_layer = get_named_submodule(model, name)
+            #    target_layer.requires_grad_(True)
+
+            if config.ADAPTER.TENT.LEVEL == 1:
+                if name.find('ConvBlock1.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.requires_grad_(True)
+
+            if config.ADAPTER.TENT.LEVEL == 2:
+                if name.find('ConvBlock1.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+
+            if config.ADAPTER.TENT.LEVEL == 3:
+
+                """
+                if name.find('ConvBlock1.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock2.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock3.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock4.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock5.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock6.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock7.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock8.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock9.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock10') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+                """
+
+                if name.find('upsample.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
 
 
-        if isinstance(m, nn.BatchNorm2d) or isinstance(m,nn.BatchNorm3d):
-            m.requires_grad_(True)
-            # force use of batch stats in train and eval modes
-            m.track_running_stats = False
-            m.running_mean = None
-            m.running_var = None
+                if name.find('upsample2.0') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+
+                if name.find('poolspa.') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+                if name.find('ConvBlock10') != -1:
+                    target_layer = get_named_submodule(model, name)
+                    target_layer.weight.requires_grad_(True)
+                    target_layer.bias.requires_grad_(True)
+
+
+
+            if isinstance(m, nn.BatchNorm2d) or isinstance(m,nn.BatchNorm3d):
+                m.requires_grad_(True)
+                # force use of batch stats in train and eval modes
+                m.track_running_stats = False
+                m.running_mean = None
+                m.running_var = None
+
+
+
     return model
 
 

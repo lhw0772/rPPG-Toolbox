@@ -128,3 +128,37 @@ def augment_horizontal_flip(clip):
     if np.random.rand() > 0.5:
         clip = np.flip(clip, 3)
     return clip
+
+
+def resize(tensor, size):
+    return F.interpolate(tensor, size=size, mode='nearest')
+
+def get_mask(clip, block_size, ratio):
+    clip = torch.from_numpy(clip)
+    clip = clip.unsqueeze(0)
+    B, C, D, H, W = clip.shape  # B: Batch size, C: Channels, D: Depth, H: Height, W: Width
+
+
+    # Initialize a tensor to store the masked clips
+    masked_clips = torch.zeros_like(clip)
+
+    # Initialize a tensor to store the masks
+    masks = torch.zeros(B, 1, D, H, W, device=clip.device)
+
+    for i in range(D):
+        img = clip[:, :, i, :, :]
+
+        mshape = B, 1, round(H / block_size), round(W / block_size)
+        input_mask = torch.rand(mshape, device=clip.device)
+        input_mask = (input_mask > ratio).float()
+        input_mask = resize(input_mask, size=(H, W))
+
+        # Store the mask for this depth
+        masks[:, :, i, :, :] = input_mask
+
+        masked_img = img * input_mask
+        masked_clips[:, :, i, :, :] = masked_img
+
+    masked_clips = masked_clips[0].detach().cpu().numpy()
+    return masked_clips
+
